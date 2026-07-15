@@ -1,44 +1,55 @@
 # yahoo-mail-mcp
 
 [![CI](https://github.com/ktrann24/yahoo-mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ktrann24/yahoo-mail-mcp/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 
-An MCP server for auditing and safely cleaning up large Yahoo Mail backlogs.
-It runs locally over stdio or as an authenticated Streamable HTTP service for
-clients such as Notion Custom Agents. It scans header metadata only, keeps
-constant memory usage, resumes interrupted scans, groups mail by exact sender
-domain, and separates review from mailbox mutation.
+Safely audit and clean up large Yahoo Mail backlogs from any MCP client.
+`yahoo-mail-mcp` scans header metadata, groups mail by account and sender
+domain, and keeps review separate from mailbox mutation.
 
-Message bodies and attachments are not downloaded or indexed.
+> [!WARNING]
+> This is alpha, single-owner software. Start with a small scan and review every
+> Archive, Delete, or Unsubscribe action before approving it.
 
-## Why this exists
+Message bodies and attachments are never downloaded or indexed.
 
-Large Yahoo mailboxes can contain hundreds of thousands of messages while the
-standard IMAP view exposes only a limited window. This project handles Yahoo's
-`UIDONLY`, `PARTIAL`, and `MESSAGELIMIT` extensions internally so an MCP client
-can perform one resumable scan instead of thousands of tool round trips.
+## What it does
 
-The intended workflow is:
+- Scans very large Yahoo mailboxes without downloading message bodies.
+- Resumes interrupted historical scans and incrementally picks up new mail.
+- Browses and searches cached sender, subject, date, size, and unsubscribe data.
+- Groups activity by account and exact sender domain.
+- Supports Keep, Needs Review, Archive, Delete, and Unsubscribe decisions.
+- Moves deleted mail to Trash without permanent expunge.
+- Runs locally over stdio or remotely over authenticated Streamable HTTP.
+- Supports one account with simple variables or multiple explicitly scoped accounts.
+
+## How cleanup works
 
 1. Connect with a Yahoo app password.
-2. Scan message headers into local SQLite.
-3. Browse recent mail, search headers, or review sender-domain summaries.
-4. Explicitly tag domains as Keep, Unsubscribe, Archive, Delete, or Needs Review.
-5. Preview the exact cleanup snapshot.
-6. Execute approved decisions; archives move out of Inbox and deletions move
-   to Trash without expunging.
+2. Scan message headers into SQLite.
+3. Review messages or sender groups.
+4. Tag an account/domain pair with a decision.
+5. Preview the exact affected snapshot.
+6. Approve `execute_decisions` to Archive, move to Trash, or unsubscribe.
 
-## Requirements
+Nothing modifies Yahoo Mail until `execute_decisions` runs against an explicitly
+tagged account and sender domain.
+
+## Five-minute local setup
+
+Requirements:
 
 - Python 3.11 or newer
 - [uv](https://docs.astral.sh/uv/)
-- A Yahoo app password for each account
-- An MCP client such as Cursor, Claude Desktop, or a Notion Custom Agent
+- A Yahoo app password
+- An MCP client such as Cursor or Claude Desktop
 
-Generate app passwords from Yahoo Account Security. Never use your regular
-Yahoo password in this project.
-
-## Install from source
+Generate an app password from
+[Yahoo Account Security](https://login.yahoo.com/myaccount/security). Never use
+your regular Yahoo password.
 
 ```bash
 git clone https://github.com/ktrann24/yahoo-mail-mcp.git
@@ -48,15 +59,45 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` and replace the placeholders:
+Edit `.env`:
 
 ```env
 YAHOO_ACCOUNT_NAME=personal
 YAHOO_EMAIL=you@yahoo.com
-YAHOO_APP_PASSWORD=your-app-password
+YAHOO_APP_PASSWORD=your-yahoo-app-password
 ```
 
-For multiple accounts, use `YAHOO_ACCOUNTS` instead of those three variables:
+Register it with Cursor:
+
+```bash
+cp .cursor/mcp.json.example .cursor/mcp.json
+```
+
+Replace the placeholder in `.cursor/mcp.json` with the absolute path to your
+clone, then restart Cursor. The real file is ignored because it is
+machine-specific.
+
+Start by asking:
+
+> List my configured accounts, then scan up to 100 messages from the Inbox of
+> account `personal`. Do not modify any mail.
+
+## Connect a Notion Custom Agent
+
+Notion needs a publicly reachable Streamable HTTP endpoint. The supported
+deployment uses Railway with a persistent volume, HTTPS, Host validation, and
+bearer authentication.
+
+Follow the complete [Railway and Notion setup guide](docs/railway.md).
+
+After connecting, keep Notion's write-tool policy set to **Always ask** for:
+
+- `set_decisions`, which only records account-scoped review choices.
+- `execute_decisions`, which performs Archive, Delete, or Unsubscribe actions.
+
+## Multiple accounts
+
+Use `YAHOO_ACCOUNTS` instead of the three single-account variables:
 
 ```env
 YAHOO_ACCOUNTS='[
@@ -65,186 +106,105 @@ YAHOO_ACCOUNTS='[
 ]'
 ```
 
-Account names must be unique. Cleanup decisions are scoped to both account and
-sender domain, and multi-account mutations require an explicit account.
+Names must be unique. Sender groups, decisions, previews, and execution are
+scoped by account. Mutating tools require an explicit account when more than
+one is configured.
 
-When a package release is published, the server will also be runnable as:
+## Example MCP prompts
 
-```bash
-uvx yahoo-mail-mcp
-```
+Read-only exploration:
 
-## Register with Cursor
+> List configured accounts and show the scan status. Do not modify mail.
 
-Copy `.cursor/mcp.json.example` to `.cursor/mcp.json`, replace the placeholder
-with the absolute path to your clone, and restart Cursor:
+> Start a background scan of at most 100 Inbox messages for account `personal`,
+> then report the job ID.
 
-```bash
-cp .cursor/mcp.json.example .cursor/mcp.json
-```
+> Show the largest sender groups for account `personal`, including counts,
+> recent dates, and available unsubscribe methods.
 
-The real `.cursor/mcp.json` is ignored because it contains a machine-specific
-absolute path.
+Safe review:
 
-## Deploy to Railway for Notion
+> Tag `newsletter.example.com` as Archive for account `personal`. Do not execute
+> the decision.
 
-Railway is used instead of Vercel because this server needs a durable SQLite
-file and long-running background scans. Vercel Functions have ephemeral local
-storage and cannot run a durable worker.
+> Preview Archive decisions for account `personal` and show the exact count and
+> sender breakdown. Do not execute.
 
-1. Push or fork this repository and create a Railway service from it.
-2. Add a Railway volume mounted at `/data`.
-3. Generate a Railway public domain and copy its hostname without `https://`.
-4. Generate a bearer token locally with `openssl rand -hex 32`.
-5. Set these Railway variables:
+## Tools
 
-```env
-YAHOO_ACCOUNT_NAME=personal
-YAHOO_EMAIL=you@yahoo.com
-YAHOO_APP_PASSWORD=your-app-password
-YAHOO_MAIL_MCP_DB=/data/mail.db
-YAHOO_MAIL_MCP_BEARER_TOKEN=<output-from-openssl>
-YAHOO_MAIL_MCP_ALLOWED_HOSTS=<your-service>.up.railway.app
-YAHOO_MAIL_MCP_REQUIRE_HTTPS=true
-```
+Read and scan:
 
-6. Have a workspace admin enable custom MCP servers under **Settings → Notion
-   AI → AI connectors**. In the agent's **Settings → Tools & Access**, choose
-   **Add connection → Custom MCP server**, enter
-   `https://<your-domain>/mcp`, and configure header-based bearer-token
-   authentication with the same token.
+- `list_accounts`
+- `scan_mailbox`, `start_scan_job`, `get_scan_job`, `list_scan_jobs`
+- `get_scan_status`, `triage_new_mail`
+- `list_recent_messages`, `search_messages`, `get_message_headers`
+- `list_sender_groups`, `get_sender_detail`
 
-`GET /health` is public and contains no account data. Every MCP request requires
-the bearer token, an allowed Host header, and HTTPS. Keep the Railway service
-private except for its generated HTTPS domain, and never put the token or Yahoo
-app passwords in source control.
+Review and mutation:
 
-The remote server omits the CSV import/export tools because accepting arbitrary
-server filesystem paths over the network is unsafe. All other tools use the
-same implementation as local mode.
+- `set_decisions`: records an account/domain decision without touching mail.
+- `preview_cleanup`: returns exact counts and a short-lived confirmation token.
+- `execute_decisions`: performs approved Archive, Delete, or Unsubscribe actions.
+- `export_review_csv`, `import_review_csv`: local-only spreadsheet round trip.
 
-### Railway connection troubleshooting
+Remote mode intentionally omits CSV tools because arbitrary server filesystem
+paths are unsafe over the network.
 
-- `400 {"error":"Host not allowed"}`: set
-  `YAHOO_MAIL_MCP_ALLOWED_HOSTS` to the exact Railway hostname, without a scheme
-  or path, and redeploy.
-- `401 {"error":"Unauthorized"}`: the Notion bearer token differs from
-  `YAHOO_MAIL_MCP_BEARER_TOKEN`. Paste only the raw token into Notion's Bearer
-  token field and redeploy after changing Railway variables.
-- Verify deployment health at `https://<your-domain>/health`, then use
-  `https://<your-domain>/mcp` as the Notion connection URL.
+## Safety and privacy
 
-## Read-only tools
-
-- `list_accounts`: verify authentication and list folders and counts.
-- `scan_mailbox`: run a checkpointed, header-only historical or incremental scan.
-- `start_scan_job`, `get_scan_job`, and `list_scan_jobs`: run and monitor a
-  durable background scan without holding a remote MCP request open.
-- `get_scan_status`: inspect checkpoints without connecting to IMAP.
-- `list_recent_messages`: browse cached recent headers with privacy-conscious defaults.
-- `search_messages`: search cached subject and sender metadata with filters.
-- `get_message_headers`: inspect one cached account/folder/UID reference.
-- `list_sender_groups` and `get_sender_detail`: review account-scoped
-  sender-domain activity.
-- `triage_new_mail`: incrementally scan new mail and return advisory suggestions.
-
-List and search results hide full sender email addresses unless explicitly
-requested. Raw unsubscribe URLs and tokens are never returned by browse tools.
-
-## Review and cleanup tools
-
-- `set_decisions`: tag an account/domain pair, including Archive, without
-  taking mailbox action.
-- `export_review_csv` and `import_review_csv`: spreadsheet review round trip.
-- `preview_cleanup`: calculate exact affected counts and issue a short-lived token.
-- `execute_decisions`: move approved mail to Archive or Trash, or execute
-  supported unsubscribe methods.
-
-Tools publish MCP safety annotations. Cached reads are marked read-only,
-`set_decisions` is a non-destructive write, and `execute_decisions` is marked
-destructive so clients such as Notion can request user confirmation. MCP
-annotations are advisory client metadata, not an authorization boundary; the
-server still applies its own preview and large-operation safeguards.
-
-## Safety model
-
-- Scans open folders read-only and use `BODY.PEEK` for selected header fields.
-- Scan limits apply across the whole tool call and checkpoints resume safely.
+- Scans use read-only folders and `BODY.PEEK` for selected header fields.
 - UIDVALIDITY changes invalidate stale folder data.
-- Decisions and mutations are scoped to an explicit account and sender domain.
-- Deletes use `UID MOVE` to Trash, never permanent expunge.
-- Archives use `UID MOVE` to the provider's `\Archive` folder.
-- Large Archive and Delete moves require a 15-minute, single-use token bound
-  to the exact message snapshot.
-- The target folder, UIDVALIDITY, and live sender domain are checked before moves.
-- One-click unsubscribe requires HTTPS, a related sender domain, public resolved
-  addresses, a pinned connection target, and no redirects.
-- Plain web unsubscribe links are reported for manual action.
-- Destructive actions are written to the local audit log.
+- Decisions and mutations are scoped to an explicit account and domain.
+- Archive and Delete use recoverable `UID MOVE` operations.
+- Large moves require a 15-minute, single-use token bound to the exact snapshot.
+- Live UIDVALIDITY and sender domains are checked before moves.
+- One-click unsubscribe blocks private addresses, unrelated domains, DNS
+  rebinding, and redirects.
+- Destructive actions are written to the SQLite audit log.
+- Browse tools do not expose raw unsubscribe URLs.
 
-Start with `max_messages=100` on one folder. Review the cached data before
-tagging or executing any decision.
+SQLite stores account aliases, folders, UIDs, sender metadata, subjects, dates,
+sizes, unsubscribe headers, decisions, checkpoints, and audit logs. It does not
+store message bodies or attachments. Protect the database and hosting
+environment as sensitive personal data.
+
+See [SECURITY.md](SECURITY.md) for the complete deployment assumptions and
+private vulnerability reporting process.
 
 ## Configuration
 
-- `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and optional `YAHOO_ACCOUNT_NAME`:
-  easiest configuration for one account.
-- `YAHOO_ACCOUNTS`: JSON array for multiple accounts; do not combine it with
-  the single-account variables.
-- `YAHOO_MAIL_MCP_DB`: SQLite path; defaults to `~/.yahoo-mail-mcp/mail.db`.
-- `YAHOO_MAIL_MCP_DELETE_THRESHOLD`: messages above which a confirm token is
-  required for Archive or Delete; defaults to `1000`.
-- `YAHOO_MAIL_MCP_BATCH_SIZE`: IMAP fetch size; defaults to `500` and is capped
-  below Yahoo's advertised `MESSAGELIMIT`.
-- `YAHOO_MAIL_MCP_LOG_LEVEL`: Python log level; defaults to `WARNING`.
-- `YAHOO_MAIL_MCP_BEARER_TOKEN`: required in HTTP mode; at least 32 characters.
-- `YAHOO_MAIL_MCP_ALLOWED_HOSTS`: required comma-separated hostnames for hosted
-  mode. Do not include a URL scheme or path.
-- `YAHOO_MAIL_MCP_REQUIRE_HTTPS`: defaults to `true` in HTTP mode.
+Common variables:
 
-## Privacy and local data
+- `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, `YAHOO_ACCOUNT_NAME`: one account.
+- `YAHOO_ACCOUNTS`: JSON array for multiple accounts.
+- `YAHOO_MAIL_MCP_DB`: SQLite path.
+- `YAHOO_MAIL_MCP_DELETE_THRESHOLD`: large-move confirmation threshold.
+- `YAHOO_MAIL_MCP_BATCH_SIZE`: IMAP fetch batch size.
+- `YAHOO_MAIL_MCP_LOG_LEVEL`: Python log level.
 
-The SQLite database stores account aliases, folders, UIDs, sender names and
-addresses, subjects, dates, sizes, unsubscribe headers, decisions,
-checkpoints, and action logs. It does not store message bodies or attachments.
+Hosted mode also requires a bearer token and allowed hostname. See
+[`.env.example`](.env.example) and [docs/railway.md](docs/railway.md).
 
-The database directory is created with owner-only permissions on POSIX
-systems. Use `YAHOO_MAIL_MCP_DB` to place it on an encrypted volume if needed.
-CSV exports contain mail metadata and should be protected like the database.
-MCP clients may retain tool output and stderr logs according to their own
-policies.
+## Why Yahoo needs special handling
 
-In hosted mode, the database and Yahoo app passwords live in the hosting
-account instead of on your computer. Secure the Railway account with MFA,
-restrict project access, retain the persistent volume, and rotate both the
-bearer token and Yahoo app passwords if either may have been exposed.
-
-To remove the local index after stopping the server:
-
-```bash
-rm -rf ~/.yahoo-mail-mcp
-```
-
-This removes only the local index. It does not modify Yahoo Mail.
+Large Yahoo mailboxes may expose only a limited standard IMAP window. This
+project handles Yahoo's `UIDONLY`, `PARTIAL`, and `MESSAGELIMIT` extensions
+internally, using checkpointed batches and constant memory instead of requiring
+thousands of MCP tool calls.
 
 ## Alpha limitations
 
-- This is a single-owner, self-hosted server, not a multi-tenant email service.
-- Yahoo app passwords and indexed header metadata live wherever you deploy it.
-- Historical scans can take multiple background jobs for very large mailboxes.
-- Unsubscribe behavior depends on sender-provided headers and may require
-  manual action.
-- Test Archive, Delete, and Unsubscribe on small synthetic or disposable
-  samples before applying them to a large mailbox.
+- This is self-hosted software for one trusted owner, not a multi-tenant service.
+- Yahoo app passwords and indexed metadata live wherever it is deployed.
+- Very large historical scans may require multiple background jobs.
+- Sender-provided unsubscribe headers can be missing or require manual action.
+- Live mailbox mutations remain manual release checks.
+
+See the [public release checklist](docs/RELEASE_CHECKLIST.md).
 
 ## Development
 
-All fixtures must be synthetic; never commit real message headers or mailbox
-exports.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines,
-[CHANGELOG.md](CHANGELOG.md) for release notes, and the
-[public release checklist](docs/RELEASE_CHECKLIST.md) before publishing.
+Use synthetic fixtures only—never commit real mailbox data or credentials.
 
 ```bash
 uv sync
@@ -256,10 +216,7 @@ uv build
 uv run twine check dist/*
 ```
 
-## Security
-
-See [SECURITY.md](SECURITY.md) for private vulnerability reporting. Do not
-publish credentials, mailbox data, or unsubscribe tokens in issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
