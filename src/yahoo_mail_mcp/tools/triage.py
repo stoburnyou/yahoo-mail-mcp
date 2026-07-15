@@ -9,16 +9,17 @@ from mcp.server.fastmcp import FastMCP
 from ..app import AppContext
 from ..imap.scanner import scan_mailbox as run_scan
 from ..store.db import utcnow
+from .annotations import READ_ONLY_REMOTE
 
 
 def register(mcp: FastMCP, ctx: AppContext) -> None:
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_REMOTE)
     def triage_new_mail(account: str, folders: list[str] | None = None) -> dict:
         """Incrementally scan new mail since the last scan and triage it.
 
         Never deletes or unsubscribes anything. Returns:
         - suggestions: new messages from domains you already tagged
-          (keep/delete/unsubscribe), grouped by decision
+          (keep/archive/delete/unsubscribe), grouped by decision
         - new_senders: domains never seen before this run, for review
         - attention: new messages that look personal (no List-Unsubscribe
           header), which usually deserve a human look
@@ -48,7 +49,12 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             (acct.name, started_at),
         ).fetchall()
 
-        suggestions: dict[str, list[dict]] = {"keep": [], "delete": [], "unsubscribe": []}
+        suggestions: dict[str, list[dict]] = {
+            "keep": [],
+            "archive": [],
+            "delete": [],
+            "unsubscribe": [],
+        }
         new_senders: dict[str, dict] = {}
         attention: list[dict] = []
 
@@ -92,7 +98,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             "new_senders": sorted(new_senders.values(), key=lambda e: -e["count"]),
             "attention": attention[:50],
             "note": (
-                "Suggestions are advisory only. To act on 'delete' or 'unsubscribe' "
-                "suggestions, run preview_cleanup and execute_decisions."
+                "Suggestions are advisory only. To act on 'archive', 'delete', or "
+                "'unsubscribe' suggestions, run preview_cleanup and execute_decisions."
             ),
         }

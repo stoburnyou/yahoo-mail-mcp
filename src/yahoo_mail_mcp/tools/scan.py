@@ -8,6 +8,8 @@ from mcp.server.fastmcp import FastMCP
 
 from ..app import AppContext
 from ..imap.scanner import scan_mailbox as run_scan
+from ..jobs import JOB_STATUSES, scan_job_record
+from .annotations import READ_ONLY_LOCAL, READ_ONLY_REMOTE
 
 
 def _safe_connection_error(exc: Exception) -> str:
@@ -20,7 +22,7 @@ def _safe_connection_error(exc: Exception) -> str:
 
 
 def register(mcp: FastMCP, ctx: AppContext) -> None:
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_REMOTE)
     def list_accounts() -> dict:
         """List configured Yahoo accounts with their folders and message counts.
 
@@ -46,7 +48,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             out.append(entry)
         return {"accounts": out}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_REMOTE)
     def scan_mailbox(
         account: str,
         folders: list[str] | None = None,
@@ -85,7 +87,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             "messages_in_database": ctx.store.message_count(acct.name),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def get_scan_status(account: str | None = None) -> dict:
         """Show scan progress per folder (from checkpoints), without connecting to IMAP."""
         sql = "SELECT * FROM checkpoints"
@@ -102,3 +104,42 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 ctx.account(account).name if account else None
             ),
         }
+
+    @mcp.tool(annotations=READ_ONLY_REMOTE)
+    def start_scan_job(
+        account: str,
+        folders: list[str] | None = None,
+        max_messages: int | None = None,
+    ) -> dict:
+        """Start a durable background header scan and return immediately.
+
+        Use this for large scans from remote clients that impose request
+        timeouts. Poll get_scan_job with the returned job_id. If the server
+        restarts, starting a new job resumes from the stored IMAP checkpoints.
+        """
+        acct = ctx.account(account)
+        if max_messages is not None and max_messages < 1:
+            return {"error": "max_messages must be at least 1"}
+        if folders is not None and (
+            not folders or any(not isinstance(folder, str) or not folder for folder in folders)
+        ):
+            return {"error": "folders must be a non-empty list of folder names"}
+        return ctx.scan_jobs.start(acct.name, folders, max_messages)
+
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
+    def get_scan_job(job_id: str) -> dict:
+        """Get status and, when complete, the result of one background scan."""
+        row = ctx.store.get_scan_job(job_id)
+        if row is None:
+            return {"error": f"No scan job found for {job_id!r}"}
+        return scan_job_record(row)
+
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
+    def list_scan_jobs(status: str | None = None, limit: int = 20) -> dict:
+        """List recent background scans, optionally filtered by status."""
+        if status is not None and status not in JOB_STATUSES:
+            return {"error": f"status must be one of {JOB_STATUSES}"}
+        if limit < 1 or limit > 100:
+            return {"error": "limit must be between 1 and 100"}
+        jobs = [scan_job_record(row) for row in ctx.store.list_scan_jobs(limit, status)]
+        return {"count": len(jobs), "jobs": jobs}

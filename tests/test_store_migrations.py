@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import stat
 
 import pytest
@@ -34,6 +35,37 @@ def test_legacy_sender_domains_migrate_to_exact_host(tmp_path):
     migrated.close()
 
 
+def test_legacy_decisions_schema_adds_archive(tmp_path):
+    path = tmp_path / "legacy-decisions.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE decisions (
+          sender_domain TEXT PRIMARY KEY,
+          decision TEXT NOT NULL
+                   CHECK (decision IN ('keep','unsubscribe','delete','needs_review')),
+          notes TEXT,
+          source TEXT NOT NULL DEFAULT 'mcp',
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO decisions VALUES (?, ?, ?, ?, ?)",
+        ("example.com", "keep", None, "mcp", "2026-07-15T00:00:00+00:00"),
+    )
+    conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO schema_meta VALUES ('sender_domain_format', 'exact-v2')")
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    store.set_decision("archive.example.com", "archive")
+
+    assert {row["decision"] for row in store.get_decisions()} == {"keep", "archive"}
+    store.close()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission modes only")
 def test_store_uses_owner_only_permissions(tmp_path):
     path = tmp_path / "private" / "mail.db"
@@ -42,3 +74,15 @@ def test_store_uses_owner_only_permissions(tmp_path):
 
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission modes only")
+def test_store_does_not_chmod_existing_parent_directory(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+
+    store = Store(shared / "mail.db")
+    store.close()
+
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755

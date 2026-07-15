@@ -25,7 +25,15 @@ seven days.
 
 ## Deployment assumptions
 
-This project is designed as a local stdio MCP server. Do not expose it as an
-unauthenticated network service. Treat `.env`, the SQLite database, CSV
-exports, MCP logs, and any future message-content output as sensitive personal
-data.
+Local stdio mode has no network listener. Hosted mode exposes Streamable HTTP
+and requires a high-entropy bearer token, HTTPS, an allowed Host header, and
+persistent private storage. Do not disable these controls or place a second
+unauthenticated proxy route in front of `/mcp`.
+
+Remote deployment is designed for a single trusted owner, not as a multi-tenant
+mail service. MCP tool annotations help clients display confirmation UI but are
+advisory and are not a substitute for server authentication or cleanup tokens.
+
+Treat hosting variables, `.env`, the SQLite database and volume, CSV exports,
+MCP logs, and any future message-content output as sensitive personal data.
+Rotate the HTTP bearer token and Yahoo app passwords after suspected exposure.

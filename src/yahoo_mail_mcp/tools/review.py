@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from ..analysis import grouping
 from ..app import AppContext
 from ..store.db import VALID_DECISIONS
+from .annotations import READ_ONLY_LOCAL, WRITE_FILESYSTEM, WRITE_LOCAL
 
 CSV_COLUMNS = [
     "sender_domain",
@@ -27,8 +28,8 @@ CSV_COLUMNS = [
 ]
 
 
-def register(mcp: FastMCP, ctx: AppContext) -> None:
-    @mcp.tool()
+def register(mcp: FastMCP, ctx: AppContext, *, include_file_tools: bool = True) -> None:
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def list_sender_groups(
         account: str | None = None,
         sort: str = "count",
@@ -40,7 +41,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         """List scanned mail grouped by sender domain.
 
         `sort` is one of: count, size, recent, oldest, domain.
-        `decision` filters by tag: keep, unsubscribe, delete, needs_review
+        `decision` filters by tag: keep, unsubscribe, archive, delete, needs_review
         (needs_review includes untagged domains). Paginate with limit/offset.
         """
         acct_name = ctx.account(account).name if account else None
@@ -55,7 +56,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         )
         return {"count": len(groups), "offset": offset, "groups": groups}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def get_sender_detail(domain: str) -> dict:
         """Full detail for one sender domain: addresses, folder breakdown,
         up to 20 sample subjects, and the unsubscribe methods detected."""
@@ -64,11 +65,12 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             return {"error": f"No scanned messages for domain {domain!r}"}
         return detail
 
-    @mcp.tool()
+    @mcp.tool(annotations=WRITE_LOCAL)
     def set_decisions(entries: list[dict]) -> dict:
         """Batch-tag sender domains with cleanup decisions.
 
-        Each entry: {"domain": "example.com", "decision": "keep|unsubscribe|delete|needs_review",
+        Each entry: {"domain": "example.com",
+        "decision": "keep|unsubscribe|archive|delete|needs_review",
         "notes": "optional"}. Decisions only take effect when execute_decisions
         is called later; nothing is deleted or unsubscribed by this tool.
         """
@@ -87,11 +89,14 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         ctx.store.log_action("set_decisions", count=len(applied), detail=str(applied[:20]))
         return {"applied": applied, "errors": errors}
 
-    @mcp.tool()
+    if not include_file_tools:
+        return
+
+    @mcp.tool(annotations=WRITE_FILESYSTEM)
     def export_review_csv(path: str) -> dict:
         """Export all sender groups to a CSV for spreadsheet review.
 
-        Edit the `decision` column (keep / unsubscribe / delete / needs_review)
+        Edit the `decision` column (keep / unsubscribe / archive / delete / needs_review)
         and re-import with import_review_csv.
         """
         groups = grouping.list_sender_groups(ctx.store.conn, limit=1_000_000)
@@ -122,7 +127,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 )
         return {"path": str(out), "rows": len(groups)}
 
-    @mcp.tool()
+    @mcp.tool(annotations=WRITE_FILESYSTEM)
     def import_review_csv(path: str) -> dict:
         """Import decisions from a CSV previously produced by export_review_csv.
 

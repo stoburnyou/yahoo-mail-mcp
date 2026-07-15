@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-VALID_DECISIONS = ("keep", "unsubscribe", "delete", "needs_review")
+VALID_DECISIONS = ("keep", "unsubscribe", "archive", "delete", "needs_review")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -38,7 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_active_account_date
 
 CREATE TABLE IF NOT EXISTS decisions (
   sender_domain TEXT PRIMARY KEY,
-  decision      TEXT NOT NULL CHECK (decision IN ('keep','unsubscribe','delete','needs_review')),
+  decision      TEXT NOT NULL
+                CHECK (decision IN ('keep','unsubscribe','archive','delete','needs_review')),
   notes         TEXT,
   source        TEXT NOT NULL DEFAULT 'mcp',
   updated_at    TEXT NOT NULL
@@ -76,6 +77,21 @@ CREATE TABLE IF NOT EXISTS action_log (
   detail     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS scan_jobs (
+  id           TEXT PRIMARY KEY,
+  account      TEXT NOT NULL,
+  folders_json TEXT,
+  max_messages INTEGER,
+  status       TEXT NOT NULL
+               CHECK (status IN ('queued','running','completed','failed','interrupted')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  started_at   TEXT,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_created ON scan_jobs (created_at DESC);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -89,16 +105,18 @@ def utcnow() -> str:
 
 class Store:
     def __init__(self, db_path: Path):
+        parent_existed = db_path.parent.exists()
         db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if os.name == "posix":
+        if os.name == "posix" and not parent_existed:
             db_path.parent.chmod(0o700)
         if not db_path.exists():
             fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
         if os.name == "posix":
             db_path.chmod(0o600)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         for suffix in ("-wal", "-shm"):
             sidecar = Path(f"{db_path}{suffix}")
@@ -107,6 +125,7 @@ class Store:
         self.conn.executescript(SCHEMA)
         self._ensure_checkpoint_phase()
         self._ensure_confirm_snapshot()
+        self._ensure_archive_decision()
         self._migrate_sender_domains()
 
     def _ensure_checkpoint_phase(self) -> None:
@@ -127,6 +146,34 @@ class Store:
         if "snapshot_hash" not in columns:
             self.conn.execute("ALTER TABLE confirm_tokens ADD COLUMN snapshot_hash TEXT")
             self.conn.commit()
+
+    def _ensure_archive_decision(self) -> None:
+        """Rebuild the decisions table when upgrading from the pre-Archive schema."""
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decisions'"
+        ).fetchone()
+        if row is not None and "'archive'" in row["sql"]:
+            return
+        self.conn.executescript(
+            """
+            CREATE TABLE decisions_with_archive (
+              sender_domain TEXT PRIMARY KEY,
+              decision      TEXT NOT NULL
+                            CHECK (decision IN (
+                              'keep','unsubscribe','archive','delete','needs_review'
+                            )),
+              notes         TEXT,
+              source        TEXT NOT NULL DEFAULT 'mcp',
+              updated_at    TEXT NOT NULL
+            );
+            INSERT INTO decisions_with_archive
+              (sender_domain, decision, notes, source, updated_at)
+            SELECT sender_domain, decision, notes, source, updated_at FROM decisions;
+            DROP TABLE decisions;
+            ALTER TABLE decisions_with_archive RENAME TO decisions;
+            """
+        )
+        self.conn.commit()
 
     def _migrate_sender_domains(self) -> None:
         """One-time migration from registrable to exact sender domains."""
@@ -225,6 +272,95 @@ class Store:
             sql += " AND account = ?"
             params.append(account)
         return self.conn.execute(sql, params).fetchone()[0]
+
+    # -- background scan jobs --------------------------------------------------
+
+    def create_scan_job(
+        self,
+        job_id: str,
+        account: str,
+        folders_json: str | None,
+        max_messages: int | None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO scan_jobs (
+              id, account, folders_json, max_messages, status, created_at
+            ) VALUES (?, ?, ?, ?, 'queued', ?)
+            """,
+            (job_id, account, folders_json, max_messages, utcnow()),
+        )
+        self.conn.commit()
+
+    def update_scan_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        result_json: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = utcnow()
+        started_at = now if status == "running" else None
+        completed_at = now if status in {"completed", "failed", "interrupted"} else None
+        self.conn.execute(
+            """
+            UPDATE scan_jobs
+            SET status = ?,
+                result_json = COALESCE(?, result_json),
+                error = ?,
+                started_at = COALESCE(started_at, ?),
+                completed_at = ?
+            WHERE id = ?
+            """,
+            (status, result_json, error, started_at, completed_at, job_id),
+        )
+        self.conn.commit()
+
+    def get_scan_job(self, job_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+
+    def list_scan_jobs(self, limit: int = 20, status: str | None = None) -> list[sqlite3.Row]:
+        if status:
+            return list(
+                self.conn.execute(
+                    """
+                    SELECT * FROM scan_jobs WHERE status = ?
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (status, limit),
+                )
+            )
+        return list(
+            self.conn.execute(
+                "SELECT * FROM scan_jobs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        )
+
+    def active_scan_job(self, account: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT * FROM scan_jobs
+            WHERE account = ? AND status IN ('queued', 'running')
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (account,),
+        ).fetchone()
+
+    def interrupt_stale_scan_jobs(self) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_jobs
+            SET status = 'interrupted',
+                error = 'Server restarted; call start_scan_job to resume from checkpoints.',
+                completed_at = ?
+            WHERE status IN ('queued', 'running')
+            """,
+            (utcnow(),),
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     # -- checkpoints -----------------------------------------------------------
 

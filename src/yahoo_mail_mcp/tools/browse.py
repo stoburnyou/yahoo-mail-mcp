@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from ..analysis import messages
 from ..app import AppContext
 from ..store.db import VALID_DECISIONS
+from .annotations import READ_ONLY_LOCAL
 
 
 def _page_result(page: tuple[list[dict], int, int, int]) -> dict:
@@ -21,7 +22,7 @@ def _page_result(page: tuple[list[dict], int, int, int]) -> dict:
 
 
 def register(mcp: FastMCP, ctx: AppContext) -> None:
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def list_recent_messages(
         account: str | None = None,
         folder: str | None = None,
@@ -49,7 +50,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             )
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def search_messages(
         query: str | None = None,
         sender_domain: str | None = None,
@@ -103,7 +104,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             )
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
     def get_message_headers(account: str, folder: str, uid: int) -> dict:
         """Get the cached headers for one exact account/folder/UID reference.
 

@@ -18,6 +18,16 @@ def test_preview_counts_and_token(store):
     assert result["confirm_token"]
 
 
+def test_preview_supports_archive(store):
+    store.upsert_messages([make_message(uid=1)])
+    store.set_decision("bigstore.com", "archive")
+
+    result = safety.preview(store, "archive")
+
+    assert result["total_messages"] == 1
+    assert result["domains"] == {"bigstore.com": 1}
+
+
 def test_token_single_use(store):
     seed_tagged(store, 10)
     token = safety.preview(store, "delete")["confirm_token"]

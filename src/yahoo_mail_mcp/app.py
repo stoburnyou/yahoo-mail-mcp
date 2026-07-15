@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .config import Account, Settings, load_settings
 from .imap.client import YahooImap
+from .jobs import ScanJobRunner
 from .store.db import Store
 
 
@@ -12,6 +13,7 @@ class AppContext:
         self.settings = settings or load_settings()
         self.store = Store(self.settings.db_path)
         self._imaps: dict[str, YahooImap] = {}
+        self._scan_jobs: ScanJobRunner | None = None
 
     def account(self, name_or_email: str) -> Account:
         return self.settings.account(name_or_email)
@@ -29,7 +31,16 @@ class AppContext:
     def accounts_by_name(self) -> dict[str, Account]:
         return {a.name: a for a in self.settings.accounts}
 
+    @property
+    def scan_jobs(self) -> ScanJobRunner:
+        if self._scan_jobs is None:
+            self._scan_jobs = ScanJobRunner(self.settings, self.store)
+        return self._scan_jobs
+
     def close(self) -> None:
+        if self._scan_jobs is not None:
+            self._scan_jobs.close()
+            self._scan_jobs = None
         for session in self._imaps.values():
             session.close()
         self._imaps.clear()

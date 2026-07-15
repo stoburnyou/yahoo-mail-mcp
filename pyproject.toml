@@ -20,13 +20,16 @@ classifiers = [
     "Topic :: Communications :: Email",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.28.1",
     "imapclient>=3.0.1",
     "python-dotenv>=1.0",
+    "uvicorn>=0.51.0",
+    "starlette>=1.3.1",
 ]
 
 [project.scripts]
 yahoo-mail-mcp = "yahoo_mail_mcp.server:main"
+yahoo-mail-mcp-http = "yahoo_mail_mcp.http:main"
 
 [project.urls]
 Homepage = "https://github.com/ktrann24/yahoo-mail-mcp"

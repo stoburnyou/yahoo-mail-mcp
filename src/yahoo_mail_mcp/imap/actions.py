@@ -1,7 +1,7 @@
-"""Destructive IMAP operations: move messages to Trash.
+"""Mailbox mutation operations using recoverable IMAP UID MOVE.
 
-Deletes are always UID MOVE to the account's Trash folder (never
-STORE \\Deleted + EXPUNGE), so mistakes are recoverable from Trash.
+Deletes move to Trash (never STORE \\Deleted + EXPUNGE); archives move to the
+provider's \\Archive folder.
 """
 
 from __future__ import annotations
@@ -43,13 +43,57 @@ def move_to_trash(
     expected_uidvalidity: int,
 ) -> int:
     """Move the given UIDs from `folder` to Trash. Returns the number moved."""
+    return _move_to_special_folder(
+        imap,
+        store,
+        account,
+        folder,
+        uids,
+        expected_uidvalidity,
+        special_use="\\Trash",
+        action_name="Trash",
+    )
+
+
+def move_to_archive(
+    imap: YahooImap,
+    store: Store,
+    account: str,
+    folder: str,
+    uids: list[int],
+    expected_uidvalidity: int,
+) -> int:
+    """Move the given UIDs from `folder` to Archive. Returns the number moved."""
+    return _move_to_special_folder(
+        imap,
+        store,
+        account,
+        folder,
+        uids,
+        expected_uidvalidity,
+        special_use="\\Archive",
+        action_name="Archive",
+    )
+
+
+def _move_to_special_folder(
+    imap: YahooImap,
+    store: Store,
+    account: str,
+    folder: str,
+    uids: list[int],
+    expected_uidvalidity: int,
+    *,
+    special_use: str,
+    action_name: str,
+) -> int:
     if not uids:
         return 0
 
-    trash = imap.find_special_folder("\\Trash")
-    if trash is None:
-        raise YahooImapError(f"No \\Trash folder found for {account}")
-    if folder == trash:
+    destination = imap.find_special_folder(special_use)
+    if destination is None:
+        raise YahooImapError(f"No {special_use} folder found for {account}")
+    if folder == destination:
         store.mark_deleted(account, folder, uids)
         return 0
 
@@ -59,7 +103,7 @@ def move_to_trash(
         raise YahooImapError(
             f"UIDVALIDITY changed for {account}/{folder} "
             f"(scanned {expected_uidvalidity}, live {live_uidvalidity}). "
-            "Stored UIDs are stale - rescan this folder before deleting."
+            "Stored UIDs are stale - rescan this folder before moving messages."
         )
 
     moved = 0
@@ -80,11 +124,11 @@ def move_to_trash(
 
         def do_move(c=move_chunk):
             ll = imap.client._imap  # noqa: SLF001 - imapclient.move lacks chunk control
-            typ, data = ll.uid("MOVE", c, f'"{trash}"')
+            typ, data = ll.uid("MOVE", c, f'"{destination}"')
             if typ != "OK":
                 raise YahooImapError(f"UID MOVE failed: {typ} {data}")
 
-        imap.with_retry(f"move {folder} -> Trash", do_move)
+        imap.with_retry(f"move {folder} -> {action_name}", do_move)
         remaining = set(
             imap.with_retry(
                 f"verify moved UIDs left {folder}",
@@ -95,7 +139,13 @@ def move_to_trash(
         if confirmed:
             store.mark_deleted(account, folder, confirmed)
         moved += len(confirmed)
-        logger.info("Moved %d messages from %s/%s to Trash", len(confirmed), account, folder)
+        logger.info(
+            "Moved %d messages from %s/%s to %s",
+            len(confirmed),
+            account,
+            folder,
+            action_name,
+        )
     return moved
 
 
