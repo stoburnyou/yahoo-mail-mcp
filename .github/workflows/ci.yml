@@ -43,3 +43,19 @@ jobs:
         run: |
           uv build
           uv run twine check dist/*
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build deployment image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: yahoo-mail-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

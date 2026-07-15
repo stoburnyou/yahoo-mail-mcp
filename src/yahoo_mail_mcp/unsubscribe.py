@@ -114,20 +114,25 @@ def _is_related_endpoint(hostname: str, sender_domain: str) -> bool:
     )
 
 
-def _pick_unsubscribe_row(conn: sqlite3.Connection, domain: str) -> sqlite3.Row | None:
+def _pick_unsubscribe_row(
+    conn: sqlite3.Connection,
+    account: str,
+    domain: str,
+) -> sqlite3.Row | None:
     """Most recent message from this domain that has any unsubscribe info,
     preferring one-click, then mailto, then http."""
     return conn.execute(
         """
         SELECT account, sender_email, unsub_mailto, unsub_http, one_click
         FROM messages
-        WHERE sender_domain = ? AND deleted_at IS NULL AND list_unsub_raw IS NOT NULL
+        WHERE account = ? AND sender_domain = ?
+          AND deleted_at IS NULL AND list_unsub_raw IS NOT NULL
         ORDER BY one_click DESC,
                  (unsub_mailto IS NOT NULL) DESC,
                  date DESC
         LIMIT 1
         """,
-        (domain,),
+        (account, domain),
     ).fetchone()
 
 
@@ -203,9 +208,12 @@ def mailto_unsubscribe(account: Account, mailto_uri: str) -> tuple[bool, str]:
 
 
 def unsubscribe_domain(
-    store: Store, accounts_by_name: dict[str, Account], domain: str
+    store: Store,
+    accounts_by_name: dict[str, Account],
+    account: str,
+    domain: str,
 ) -> UnsubscribeOutcome:
-    row = _pick_unsubscribe_row(store.conn, domain)
+    row = _pick_unsubscribe_row(store.conn, account, domain)
     if row is None:
         return UnsubscribeOutcome(domain, "none", False, "No List-Unsubscribe header on record")
 
@@ -213,13 +221,13 @@ def unsubscribe_domain(
         ok, detail = one_click_unsubscribe(row["unsub_http"], domain)
         outcome = UnsubscribeOutcome(domain, "one_click", ok, detail)
     elif row["unsub_mailto"]:
-        account = accounts_by_name.get(row["account"])
-        if account is None:
+        account_config = accounts_by_name.get(row["account"])
+        if account_config is None:
             outcome = UnsubscribeOutcome(
                 domain, "mailto", False, f"Account {row['account']} not configured"
             )
         else:
-            ok, detail = mailto_unsubscribe(account, row["unsub_mailto"])
+            ok, detail = mailto_unsubscribe(account_config, row["unsub_mailto"])
             outcome = UnsubscribeOutcome(domain, "mailto", ok, detail)
     elif row["unsub_http"]:
         outcome = UnsubscribeOutcome(

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from starlette.testclient import TestClient
 
-from yahoo_mail_mcp.http import create_http_app
+from yahoo_mail_mcp.http import _allowed_hosts, create_http_app
 from yahoo_mail_mcp.server import build_server
 
 
@@ -63,6 +63,39 @@ def test_http_rejects_unlisted_host(store):
     assert response.json() == {"error": "Host not allowed"}
 
 
+def test_allowed_hosts_include_explicit_and_railway_domains(monkeypatch):
+    monkeypatch.setenv(
+        "YAHOO_MAIL_MCP_ALLOWED_HOSTS",
+        "mail.example.com, SECOND.EXAMPLE.COM.",
+    )
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "service.up.railway.app")
+
+    hosts = _allowed_hosts()
+
+    assert "mail.example.com" in hosts
+    assert "second.example.com" in hosts
+    assert "service.up.railway.app" in hosts
+
+
+def test_http_requires_https_when_enabled(store):
+    app = create_http_app(
+        ctx=FakeContext(store),
+        bearer_token="c" * 32,
+        allowed_hosts={"testserver"},
+        require_https=True,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp",
+            json={},
+            headers={"Authorization": f"Bearer {'c' * 32}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "HTTPS required"}
+
+
 def test_http_requires_strong_token(store):
     try:
         create_http_app(ctx=FakeContext(store), bearer_token="short")
@@ -81,6 +114,9 @@ def test_remote_tools_exclude_file_access_and_publish_safety_annotations(store):
     assert tools["list_recent_messages"].annotations.readOnlyHint is True
     assert tools["set_decisions"].annotations.destructiveHint is False
     assert tools["execute_decisions"].annotations.destructiveHint is True
+    assert "account" in tools["set_decisions"].inputSchema["properties"]
+    assert "account" in tools["preview_cleanup"].inputSchema["properties"]
+    assert "account" in tools["execute_decisions"].inputSchema["properties"]
 
 
 def test_local_tools_keep_csv_round_trip(store):

@@ -19,7 +19,7 @@ def test_legacy_sender_domains_migrate_to_exact_host(tmp_path):
             )
         ]
     )
-    store.set_decision("example.com", "delete")
+    store.set_decision("personal", "example.com", "delete")
     store.conn.execute("DELETE FROM schema_meta WHERE key = 'sender_domain_format'")
     store.conn.commit()
     store.close()
@@ -35,7 +35,7 @@ def test_legacy_sender_domains_migrate_to_exact_host(tmp_path):
     migrated.close()
 
 
-def test_legacy_decisions_schema_adds_archive(tmp_path):
+def test_legacy_global_decisions_are_invalidated_for_account_scope(tmp_path):
     path = tmp_path / "legacy-decisions.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -60,9 +60,14 @@ def test_legacy_decisions_schema_adds_archive(tmp_path):
     conn.close()
 
     store = Store(path)
-    store.set_decision("archive.example.com", "archive")
+    store.set_decision("personal", "archive.example.com", "archive")
 
-    assert {row["decision"] for row in store.get_decisions()} == {"keep", "archive"}
+    decisions = store.get_decisions()
+    assert [(row["account"], row["decision"]) for row in decisions] == [("personal", "archive")]
+    audit = store.conn.execute(
+        "SELECT count FROM action_log WHERE action = 'invalidate_global_decisions'"
+    ).fetchone()
+    assert audit["count"] == 1
     store.close()
 
 

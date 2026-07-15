@@ -37,12 +37,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_active_account_date
   ON messages (account, date) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS decisions (
-  sender_domain TEXT PRIMARY KEY,
+  account       TEXT NOT NULL,
+  sender_domain TEXT NOT NULL,
   decision      TEXT NOT NULL
                 CHECK (decision IN ('keep','unsubscribe','archive','delete','needs_review')),
   notes         TEXT,
   source        TEXT NOT NULL DEFAULT 'mcp',
-  updated_at    TEXT NOT NULL
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (account, sender_domain)
 );
 
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -125,7 +127,7 @@ class Store:
         self.conn.executescript(SCHEMA)
         self._ensure_checkpoint_phase()
         self._ensure_confirm_snapshot()
-        self._ensure_archive_decision()
+        self._ensure_account_scoped_decisions()
         self._migrate_sender_domains()
 
     def _ensure_checkpoint_phase(self) -> None:
@@ -147,32 +149,45 @@ class Store:
             self.conn.execute("ALTER TABLE confirm_tokens ADD COLUMN snapshot_hash TEXT")
             self.conn.commit()
 
-    def _ensure_archive_decision(self) -> None:
-        """Rebuild the decisions table when upgrading from the pre-Archive schema."""
-        row = self.conn.execute(
+    def _ensure_account_scoped_decisions(self) -> None:
+        """Invalidate ambiguous global decisions when adding account scope."""
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(decisions)")}
+        table = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decisions'"
         ).fetchone()
-        if row is not None and "'archive'" in row["sql"]:
+        if "account" in columns and table is not None and "'archive'" in table["sql"]:
             return
+        decision_count = self.conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
         self.conn.executescript(
             """
-            CREATE TABLE decisions_with_archive (
-              sender_domain TEXT PRIMARY KEY,
+            CREATE TABLE account_scoped_decisions (
+              account       TEXT NOT NULL,
+              sender_domain TEXT NOT NULL,
               decision      TEXT NOT NULL
                             CHECK (decision IN (
                               'keep','unsubscribe','archive','delete','needs_review'
                             )),
               notes         TEXT,
               source        TEXT NOT NULL DEFAULT 'mcp',
-              updated_at    TEXT NOT NULL
+              updated_at    TEXT NOT NULL,
+              PRIMARY KEY (account, sender_domain)
             );
-            INSERT INTO decisions_with_archive
-              (sender_domain, decision, notes, source, updated_at)
-            SELECT sender_domain, decision, notes, source, updated_at FROM decisions;
             DROP TABLE decisions;
-            ALTER TABLE decisions_with_archive RENAME TO decisions;
+            ALTER TABLE account_scoped_decisions RENAME TO decisions;
             """
         )
+        if decision_count:
+            self.conn.execute(
+                """
+                INSERT INTO action_log (ts, action, count, detail)
+                VALUES (?, 'invalidate_global_decisions', ?, ?)
+                """,
+                (
+                    utcnow(),
+                    decision_count,
+                    "Cleanup decisions now require an explicit account; review them again",
+                ),
+            )
         self.conn.commit()
 
     def _migrate_sender_domains(self) -> None:
@@ -418,30 +433,47 @@ class Store:
     # -- decisions ---------------------------------------------------------------
 
     def set_decision(
-        self, domain: str, decision: str, notes: str | None = None, source: str = "mcp"
+        self,
+        account: str,
+        domain: str,
+        decision: str,
+        notes: str | None = None,
+        source: str = "mcp",
     ) -> None:
         if decision not in VALID_DECISIONS:
             raise ValueError(f"Invalid decision {decision!r}; must be one of {VALID_DECISIONS}")
         self.conn.execute(
             """
-            INSERT INTO decisions (sender_domain, decision, notes, source, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (sender_domain) DO UPDATE SET
+            INSERT INTO decisions (account, sender_domain, decision, notes, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (account, sender_domain) DO UPDATE SET
               decision = excluded.decision,
               notes = excluded.notes,
               source = excluded.source,
               updated_at = excluded.updated_at
             """,
-            (domain.lower(), decision, notes, source, utcnow()),
+            (account, domain.lower(), decision, notes, source, utcnow()),
         )
         self.conn.commit()
 
-    def get_decisions(self, decision: str | None = None) -> list[sqlite3.Row]:
+    def get_decisions(
+        self,
+        account: str | None = None,
+        decision: str | None = None,
+    ) -> list[sqlite3.Row]:
+        clauses = []
+        params: list[str] = []
+        if account:
+            clauses.append("account = ?")
+            params.append(account)
         if decision:
-            return self.conn.execute(
-                "SELECT * FROM decisions WHERE decision = ? ORDER BY sender_domain", (decision,)
-            ).fetchall()
-        return self.conn.execute("SELECT * FROM decisions ORDER BY sender_domain").fetchall()
+            clauses.append("decision = ?")
+            params.append(decision)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.conn.execute(
+            f"SELECT * FROM decisions{where} ORDER BY account, sender_domain",
+            params,
+        ).fetchall()
 
     # -- confirm tokens ----------------------------------------------------------
 

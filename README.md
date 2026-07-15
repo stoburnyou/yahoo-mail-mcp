@@ -1,6 +1,7 @@
 # yahoo-mail-mcp
 
 [![CI](https://github.com/ktrann24/yahoo-mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ktrann24/yahoo-mail-mcp/actions/workflows/ci.yml)
+![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 
 An MCP server for auditing and safely cleaning up large Yahoo Mail backlogs.
 It runs locally over stdio or as an authenticated Streamable HTTP service for
@@ -50,11 +51,22 @@ chmod 600 .env
 Edit `.env` and replace the placeholders:
 
 ```env
-YAHOO_ACCOUNTS='[{"name":"personal","email":"you@yahoo.com","app_password":"your-app-password"}]'
+YAHOO_ACCOUNT_NAME=personal
+YAHOO_EMAIL=you@yahoo.com
+YAHOO_APP_PASSWORD=your-app-password
 ```
 
-Multiple account objects can be included in the JSON array. Account `name`
-values must be unique.
+For multiple accounts, use `YAHOO_ACCOUNTS` instead of those three variables:
+
+```env
+YAHOO_ACCOUNTS='[
+  {"name":"personal","email":"one@yahoo.com","app_password":"app-password-one"},
+  {"name":"work","email":"two@yahoo.com","app_password":"app-password-two"}
+]'
+```
+
+Account names must be unique. Cleanup decisions are scoped to both account and
+sender domain, and multi-account mutations require an explicit account.
 
 When a package release is published, the server will also be runnable as:
 
@@ -82,18 +94,20 @@ storage and cannot run a durable worker.
 
 1. Push or fork this repository and create a Railway service from it.
 2. Add a Railway volume mounted at `/data`.
-3. Generate a bearer token locally with `openssl rand -hex 32`.
-4. Set these Railway variables:
+3. Generate a Railway public domain and copy its hostname without `https://`.
+4. Generate a bearer token locally with `openssl rand -hex 32`.
+5. Set these Railway variables:
 
 ```env
-YAHOO_ACCOUNTS=[{"name":"personal","email":"you@yahoo.com","app_password":"your-app-password"}]
+YAHOO_ACCOUNT_NAME=personal
+YAHOO_EMAIL=you@yahoo.com
+YAHOO_APP_PASSWORD=your-app-password
 YAHOO_MAIL_MCP_DB=/data/mail.db
 YAHOO_MAIL_MCP_BEARER_TOKEN=<output-from-openssl>
+YAHOO_MAIL_MCP_ALLOWED_HOSTS=<your-service>.up.railway.app
 YAHOO_MAIL_MCP_REQUIRE_HTTPS=true
 ```
 
-5. Generate a Railway public domain. The server automatically allows the
-   hostname in Railway's `RAILWAY_PUBLIC_DOMAIN` variable.
 6. Have a workspace admin enable custom MCP servers under **Settings → Notion
    AI → AI connectors**. In the agent's **Settings → Tools & Access**, choose
    **Add connection → Custom MCP server**, enter
@@ -109,6 +123,17 @@ The remote server omits the CSV import/export tools because accepting arbitrary
 server filesystem paths over the network is unsafe. All other tools use the
 same implementation as local mode.
 
+### Railway connection troubleshooting
+
+- `400 {"error":"Host not allowed"}`: set
+  `YAHOO_MAIL_MCP_ALLOWED_HOSTS` to the exact Railway hostname, without a scheme
+  or path, and redeploy.
+- `401 {"error":"Unauthorized"}`: the Notion bearer token differs from
+  `YAHOO_MAIL_MCP_BEARER_TOKEN`. Paste only the raw token into Notion's Bearer
+  token field and redeploy after changing Railway variables.
+- Verify deployment health at `https://<your-domain>/health`, then use
+  `https://<your-domain>/mcp` as the Notion connection URL.
+
 ## Read-only tools
 
 - `list_accounts`: verify authentication and list folders and counts.
@@ -119,7 +144,8 @@ same implementation as local mode.
 - `list_recent_messages`: browse cached recent headers with privacy-conscious defaults.
 - `search_messages`: search cached subject and sender metadata with filters.
 - `get_message_headers`: inspect one cached account/folder/UID reference.
-- `list_sender_groups` and `get_sender_detail`: review aggregate sender-domain activity.
+- `list_sender_groups` and `get_sender_detail`: review account-scoped
+  sender-domain activity.
 - `triage_new_mail`: incrementally scan new mail and return advisory suggestions.
 
 List and search results hide full sender email addresses unless explicitly
@@ -127,7 +153,8 @@ requested. Raw unsubscribe URLs and tokens are never returned by browse tools.
 
 ## Review and cleanup tools
 
-- `set_decisions`: tag domains, including Archive, without taking mailbox action.
+- `set_decisions`: tag an account/domain pair, including Archive, without
+  taking mailbox action.
 - `export_review_csv` and `import_review_csv`: spreadsheet review round trip.
 - `preview_cleanup`: calculate exact affected counts and issue a short-lived token.
 - `execute_decisions`: move approved mail to Archive or Trash, or execute
@@ -144,6 +171,7 @@ server still applies its own preview and large-operation safeguards.
 - Scans open folders read-only and use `BODY.PEEK` for selected header fields.
 - Scan limits apply across the whole tool call and checkpoints resume safely.
 - UIDVALIDITY changes invalidate stale folder data.
+- Decisions and mutations are scoped to an explicit account and sender domain.
 - Deletes use `UID MOVE` to Trash, never permanent expunge.
 - Archives use `UID MOVE` to the provider's `\Archive` folder.
 - Large Archive and Delete moves require a 15-minute, single-use token bound
@@ -159,7 +187,10 @@ tagging or executing any decision.
 
 ## Configuration
 
-- `YAHOO_ACCOUNTS` (required): JSON array of account names, emails, and app passwords.
+- `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, and optional `YAHOO_ACCOUNT_NAME`:
+  easiest configuration for one account.
+- `YAHOO_ACCOUNTS`: JSON array for multiple accounts; do not combine it with
+  the single-account variables.
 - `YAHOO_MAIL_MCP_DB`: SQLite path; defaults to `~/.yahoo-mail-mcp/mail.db`.
 - `YAHOO_MAIL_MCP_DELETE_THRESHOLD`: messages above which a confirm token is
   required for Archive or Delete; defaults to `1000`.
@@ -167,8 +198,8 @@ tagging or executing any decision.
   below Yahoo's advertised `MESSAGELIMIT`.
 - `YAHOO_MAIL_MCP_LOG_LEVEL`: Python log level; defaults to `WARNING`.
 - `YAHOO_MAIL_MCP_BEARER_TOKEN`: required in HTTP mode; at least 32 characters.
-- `YAHOO_MAIL_MCP_ALLOWED_HOSTS`: optional comma-separated custom hostnames.
-  Railway's public domain is allowed automatically.
+- `YAHOO_MAIL_MCP_ALLOWED_HOSTS`: required comma-separated hostnames for hosted
+  mode. Do not include a URL scheme or path.
 - `YAHOO_MAIL_MCP_REQUIRE_HTTPS`: defaults to `true` in HTTP mode.
 
 ## Privacy and local data
@@ -196,10 +227,24 @@ rm -rf ~/.yahoo-mail-mcp
 
 This removes only the local index. It does not modify Yahoo Mail.
 
+## Alpha limitations
+
+- This is a single-owner, self-hosted server, not a multi-tenant email service.
+- Yahoo app passwords and indexed header metadata live wherever you deploy it.
+- Historical scans can take multiple background jobs for very large mailboxes.
+- Unsubscribe behavior depends on sender-provided headers and may require
+  manual action.
+- Test Archive, Delete, and Unsubscribe on small synthetic or disposable
+  samples before applying them to a large mailbox.
+
 ## Development
 
 All fixtures must be synthetic; never commit real message headers or mailbox
 exports.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines,
+[CHANGELOG.md](CHANGELOG.md) for release notes, and the
+[public release checklist](docs/RELEASE_CHECKLIST.md) before publishing.
 
 ```bash
 uv sync

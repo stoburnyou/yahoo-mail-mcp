@@ -25,7 +25,8 @@ def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> Fast
             "or search_messages -> list_sender_groups -> "
             f"{decision_step} -> preview_cleanup -> execute_decisions. "
             "Nothing is archived, deleted, or unsubscribed until execute_decisions runs on "
-            "explicitly tagged domains."
+            "explicitly tagged account/domain pairs. Always name the account before "
+            "previewing or executing a mutation."
         ),
         stateless_http=remote,
         json_response=remote,

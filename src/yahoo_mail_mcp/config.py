@@ -40,7 +40,7 @@ class Settings:
         known = ", ".join(a.name for a in self.accounts) or "(none configured)"
         raise KeyError(
             f"Unknown account {name_or_email!r}. Configured accounts: {known}. "
-            "Check the YAHOO_ACCOUNTS environment variable."
+            "Check YAHOO_ACCOUNTS or the single-account environment variables."
         )
 
 
@@ -49,6 +49,13 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
 
     accounts: list[Account] = []
     raw = os.environ.get("YAHOO_ACCOUNTS", "").strip()
+    single_email = os.environ.get("YAHOO_EMAIL", "").strip()
+    single_password = os.environ.get("YAHOO_APP_PASSWORD", "").strip()
+    single_name = os.environ.get("YAHOO_ACCOUNT_NAME", "").strip()
+    if raw and any((single_email, single_password, single_name)):
+        raise ValueError(
+            "Configure either YAHOO_ACCOUNTS or the single-account variables, not both"
+        )
     if raw:
         try:
             parsed = json.loads(raw)
@@ -67,15 +74,31 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
                     app_password=entry["app_password"].replace(" ", ""),
                 )
             )
-        names = [account.name.lower() for account in accounts]
-        emails = [account.email.lower() for account in accounts]
-        identifiers = names + emails
-        if len(set(names)) != len(names):
-            raise ValueError("YAHOO_ACCOUNTS account names must be unique")
-        if len(set(emails)) != len(emails):
-            raise ValueError("YAHOO_ACCOUNTS email addresses must be unique")
-        if len(set(identifiers)) != len(identifiers):
-            raise ValueError("YAHOO_ACCOUNTS names must not collide with account email addresses")
+    elif any((single_email, single_password, single_name)):
+        if not single_email or not single_password:
+            raise ValueError("YAHOO_EMAIL and YAHOO_APP_PASSWORD are both required for one account")
+        accounts.append(
+            Account(
+                name=single_name or "personal",
+                email=single_email,
+                app_password=single_password.replace(" ", ""),
+            )
+        )
+
+    names = [account.name.lower() for account in accounts]
+    emails = [account.email.lower() for account in accounts]
+    identifiers = names + emails
+    if len(set(names)) != len(names):
+        raise ValueError("Account names must be unique")
+    if len(set(emails)) != len(emails):
+        raise ValueError("Account email addresses must be unique")
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("Account names must not collide with account email addresses")
+    if not accounts:
+        raise ValueError(
+            "Configure at least one Yahoo account with YAHOO_EMAIL and "
+            "YAHOO_APP_PASSWORD, or with YAHOO_ACCOUNTS"
+        )
 
     db_path = Path(os.environ.get("YAHOO_MAIL_MCP_DB") or DEFAULT_DB_PATH).expanduser()
     threshold = int(os.environ.get("YAHOO_MAIL_MCP_DELETE_THRESHOLD") or DEFAULT_DELETE_THRESHOLD)

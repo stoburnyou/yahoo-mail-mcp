@@ -15,6 +15,7 @@ Reports are especially helpful for:
 
 - exposure of Yahoo credentials or locally indexed mail metadata;
 - IMAP UID or UIDVALIDITY handling that could target the wrong message;
+- account-scoping failures that could affect another configured mailbox;
 - bypasses of cleanup previews or confirmation tokens;
 - server-side request forgery in one-click unsubscribe handling;
 - unexpected mailbox mutation from a read-only tool.

@@ -18,6 +18,7 @@ from ..imap.actions import move_to_archive, move_to_trash
 from ..imap.client import YahooImapError
 from ..imap.scanner import _parse_fetch_responses, _raw_uid_fetch
 from ..unsubscribe import unsubscribe_domain
+from .account_scope import resolve_account
 from .annotations import DESTRUCTIVE_REMOTE, READ_ONLY_LOCAL
 
 logger = logging.getLogger(__name__)
@@ -68,16 +69,23 @@ def _spot_check(
 
 def register(mcp: FastMCP, ctx: AppContext) -> None:
     @mcp.tool(annotations=READ_ONLY_LOCAL)
-    def preview_cleanup(decision: str = "delete") -> dict:
+    def preview_cleanup(
+        decision: str = "delete",
+        account: str | None = None,
+    ) -> dict:
         """Dry run for execute_decisions: exact counts of affected messages
-        per domain and per account, plus a confirm_token.
+        for one account and per domain, plus a confirm_token.
 
         Nothing in Yahoo Mail is modified. The token is required by
         execute_decisions for large Archive or Delete operations.
         """
         if decision not in ("archive", "delete", "unsubscribe"):
             return {"error": "decision must be 'archive', 'delete', or 'unsubscribe'"}
-        result = safety.preview(ctx.store, decision)
+        try:
+            account_name = resolve_account(ctx, account)
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc)}
+        result = safety.preview(ctx.store, account_name, decision)
         result["threshold"] = ctx.settings.delete_threshold
         result["confirm_required"] = (
             decision in ("archive", "delete")
@@ -86,9 +94,14 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         return result
 
     @mcp.tool(annotations=DESTRUCTIVE_REMOTE)
-    def execute_decisions(decision: str, confirm_token: str | None = None) -> dict:
+    def execute_decisions(
+        decision: str,
+        account: str | None = None,
+        confirm_token: str | None = None,
+    ) -> dict:
         """Execute tagged decisions. THE ONLY DESTRUCTIVE TOOL.
 
+        `account` is required unless exactly one account is configured.
         decision="archive": moves messages from domains tagged 'archive' to the
         provider's Archive folder. decision="delete": moves tagged messages to
         Trash (recoverable). If either total exceeds the safety threshold, a
@@ -100,16 +113,22 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
 
         Domains tagged 'keep' or 'needs_review' are never touched.
         """
-        if decision == "archive":
-            return _execute_move("archive", confirm_token)
-        if decision == "delete":
-            return _execute_move("delete", confirm_token)
-        if decision == "unsubscribe":
-            return _execute_unsubscribe()
-        return {"error": "decision must be 'archive', 'delete', or 'unsubscribe'"}
+        if decision not in ("archive", "delete", "unsubscribe"):
+            return {"error": "decision must be 'archive', 'delete', or 'unsubscribe'"}
+        try:
+            account_name = resolve_account(ctx, account)
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc)}
+        if decision in ("archive", "delete"):
+            return _execute_move(account_name, decision, confirm_token)
+        return _execute_unsubscribe(account_name)
 
-    def _execute_move(decision: str, confirm_token: str | None) -> dict:
-        rows = safety.pending_messages(ctx.store.conn, decision)
+    def _execute_move(
+        account: str,
+        decision: str,
+        confirm_token: str | None,
+    ) -> dict:
+        rows = safety.pending_messages(ctx.store.conn, account, decision)
         total = len(rows)
         result_key = "archived" if decision == "archive" else "deleted"
         destination = "Archive" if decision == "archive" else "Trash"
@@ -181,13 +200,24 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             ),
         }
 
-    def _execute_unsubscribe() -> dict:
-        domains = [row["sender_domain"] for row in ctx.store.get_decisions("unsubscribe")]
+    def _execute_unsubscribe(account: str) -> dict:
+        domains = [
+            row["sender_domain"]
+            for row in ctx.store.get_decisions(
+                account=account,
+                decision="unsubscribe",
+            )
+        ]
         if not domains:
             return {"results": [], "detail": "No domains tagged 'unsubscribe'."}
         results = []
         for domain in domains:
-            outcome = unsubscribe_domain(ctx.store, ctx.accounts_by_name, domain)
+            outcome = unsubscribe_domain(
+                ctx.store,
+                ctx.accounts_by_name,
+                account,
+                domain,
+            )
             results.append(
                 {
                     "domain": outcome.sender_domain,

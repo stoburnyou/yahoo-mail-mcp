@@ -42,7 +42,8 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             SELECT m.folder, m.uid, m.sender_email, m.sender_domain, m.sender_name,
                    m.subject, m.date, m.list_unsub_raw, d.decision
             FROM messages m
-            LEFT JOIN decisions d ON d.sender_domain = m.sender_domain
+            LEFT JOIN decisions d
+              ON d.account = m.account AND d.sender_domain = m.sender_domain
             WHERE m.account = ? AND m.scanned_at >= ? AND m.deleted_at IS NULL
             ORDER BY m.date DESC
             """,

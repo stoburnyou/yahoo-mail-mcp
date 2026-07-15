@@ -22,7 +22,8 @@ SELECT
   d.updated_at AS decision_updated_at,
   c.uidvalidity AS checkpoint_uidvalidity
 FROM messages m
-LEFT JOIN decisions d ON d.sender_domain = m.sender_domain
+LEFT JOIN decisions d
+  ON d.account = m.account AND d.sender_domain = m.sender_domain
 LEFT JOIN checkpoints c ON c.account = m.account AND c.folder = m.folder
 """
 
@@ -130,7 +131,8 @@ def _run_page(
     where_sql = " WHERE " + " AND ".join(where)
     total = conn.execute(
         "SELECT COUNT(*) FROM messages m "
-        "LEFT JOIN decisions d ON d.sender_domain = m.sender_domain "
+        "LEFT JOIN decisions d "
+        "ON d.account = m.account AND d.sender_domain = m.sender_domain "
         "LEFT JOIN checkpoints c ON c.account = m.account AND c.folder = m.folder" + where_sql,
         params,
     ).fetchone()[0]

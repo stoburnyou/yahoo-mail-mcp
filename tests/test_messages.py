@@ -123,7 +123,7 @@ def test_recent_truncates_subject_and_caps_limit(store):
 
 def test_search_combines_filters_and_decisions(store):
     seed(store)
-    store.set_decision("email.ticketmaster.com", "delete")
+    store.set_decision("personal", "email.ticketmaster.com", "delete")
 
     page, total, *_ = messages.search_messages(
         store.conn,

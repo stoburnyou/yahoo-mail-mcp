@@ -27,22 +27,27 @@ def _snapshot_hash(rows: list[sqlite3.Row]) -> str:
     return digest.hexdigest()
 
 
-def pending_messages(conn: sqlite3.Connection, decision: str) -> list[sqlite3.Row]:
-    """All not-yet-deleted messages whose sender domain is tagged `decision`."""
+def pending_messages(
+    conn: sqlite3.Connection,
+    account: str,
+    decision: str,
+) -> list[sqlite3.Row]:
+    """Pending messages for one account whose sender domain has `decision`."""
     return conn.execute(
         """
         SELECT m.account, m.folder, m.uid, m.uidvalidity, m.sender_domain
         FROM messages m
-        JOIN decisions d ON d.sender_domain = m.sender_domain
-        WHERE d.decision = ? AND m.deleted_at IS NULL
+        JOIN decisions d
+          ON d.account = m.account AND d.sender_domain = m.sender_domain
+        WHERE m.account = ? AND d.decision = ? AND m.deleted_at IS NULL
         ORDER BY m.account, m.folder, m.uid
         """,
-        (decision,),
+        (account, decision),
     ).fetchall()
 
 
-def preview(store: Store, decision: str) -> dict:
-    rows = pending_messages(store.conn, decision)
+def preview(store: Store, account: str, decision: str) -> dict:
+    rows = pending_messages(store.conn, account, decision)
     per_domain: dict[str, int] = {}
     per_account: dict[str, int] = {}
     for row in rows:
@@ -54,6 +59,7 @@ def preview(store: Store, decision: str) -> dict:
     store.save_confirm_token(token, decision, total, _snapshot_hash(rows))
 
     return {
+        "account": account,
         "decision": decision,
         "total_messages": total,
         "domains": dict(sorted(per_domain.items(), key=lambda kv: -kv[1])),

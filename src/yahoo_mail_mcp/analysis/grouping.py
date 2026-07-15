@@ -16,16 +16,18 @@ SORT_COLUMNS = {
 def _group_row_to_dict(
     conn: sqlite3.Connection, row: sqlite3.Row, sample_subjects: int = 5
 ) -> dict:
+    account = row["account"]
     domain = row["sender_domain"]
     addresses = [
         r[0]
         for r in conn.execute(
             """
             SELECT sender_email FROM messages
-            WHERE sender_domain = ? AND deleted_at IS NULL AND sender_email IS NOT NULL
+            WHERE account = ? AND sender_domain = ?
+              AND deleted_at IS NULL AND sender_email IS NOT NULL
             GROUP BY sender_email ORDER BY COUNT(*) DESC LIMIT 10
             """,
-            (domain,),
+            (account, domain),
         )
     ]
     subjects = [
@@ -33,17 +35,11 @@ def _group_row_to_dict(
         for r in conn.execute(
             """
             SELECT subject FROM messages
-            WHERE sender_domain = ? AND deleted_at IS NULL AND subject IS NOT NULL
+            WHERE account = ? AND sender_domain = ?
+              AND deleted_at IS NULL AND subject IS NOT NULL
             GROUP BY subject ORDER BY MAX(date) DESC LIMIT ?
             """,
-            (domain, sample_subjects),
-        )
-    ]
-    accounts = [
-        r[0]
-        for r in conn.execute(
-            "SELECT DISTINCT account FROM messages WHERE sender_domain = ? AND deleted_at IS NULL",
-            (domain,),
+            (account, domain, sample_subjects),
         )
     ]
 
@@ -58,8 +54,9 @@ def _group_row_to_dict(
         methods.append("http")
 
     return {
+        "account": account,
         "sender_domain": domain,
-        "accounts": accounts,
+        "accounts": [account],
         "sender_addresses": addresses,
         "message_count": total,
         "total_size_mb": round((row["total_size_bytes"] or 0) / (1024 * 1024), 1),
@@ -78,6 +75,7 @@ def _group_row_to_dict(
 
 _GROUP_SQL = """
 SELECT
+  m.account,
   m.sender_domain,
   COUNT(*) AS message_count,
   SUM(m.size_bytes) AS total_size_bytes,
@@ -90,7 +88,8 @@ SELECT
   d.decision AS decision,
   d.updated_at AS decision_updated_at
 FROM messages m
-LEFT JOIN decisions d ON d.sender_domain = m.sender_domain
+LEFT JOIN decisions d
+  ON d.account = m.account AND d.sender_domain = m.sender_domain
 WHERE m.sender_domain IS NOT NULL AND m.deleted_at IS NULL
 """
 
@@ -112,7 +111,7 @@ def list_sender_groups(
     if account:
         sql += " AND m.account = ?"
         params.append(account)
-    sql += " GROUP BY m.sender_domain HAVING COUNT(*) >= ?"
+    sql += " GROUP BY m.account, m.sender_domain HAVING COUNT(*) >= ?"
     params.append(min_count)
     if decision:
         if decision == "needs_review":
@@ -128,10 +127,16 @@ def list_sender_groups(
 
 
 def get_sender_detail(
-    conn: sqlite3.Connection, domain: str, sample_subjects: int = 20
+    conn: sqlite3.Connection,
+    account: str,
+    domain: str,
+    sample_subjects: int = 20,
 ) -> dict | None:
-    sql = _GROUP_SQL + " AND m.sender_domain = ? GROUP BY m.sender_domain"
-    row = conn.execute(sql, (domain.lower(),)).fetchone()
+    sql = (
+        _GROUP_SQL
+        + " AND m.account = ? AND m.sender_domain = ? GROUP BY m.account, m.sender_domain"
+    )
+    row = conn.execute(sql, (account, domain.lower())).fetchone()
     if row is None:
         return None
     detail = _group_row_to_dict(conn, row, sample_subjects=sample_subjects)
@@ -141,10 +146,11 @@ def get_sender_detail(
         for r in conn.execute(
             """
             SELECT account, folder, COUNT(*) AS count
-            FROM messages WHERE sender_domain = ? AND deleted_at IS NULL
+            FROM messages
+            WHERE account = ? AND sender_domain = ? AND deleted_at IS NULL
             GROUP BY account, folder ORDER BY count DESC
             """,
-            (domain.lower(),),
+            (account, domain.lower()),
         )
     ]
     return detail
