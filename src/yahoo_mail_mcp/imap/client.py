@@ -152,10 +152,17 @@ class YahooImap:
         """
         if self._uidonly_enabled:
             return True
-        if not self.client.has_capability("UIDONLY"):
-            return False
-        # Must be issued in authenticated state, before SELECT.
-        enabled = self.client.enable("UIDONLY")
+        # ENABLE is only valid in authenticated state. A shared tool session may
+        # already have a selected folder, so reconnect before switching modes.
+        if self._selected_folder is not None:
+            self.close()
+            self.connect()
+        try:
+            if not self.client.has_capability("UIDONLY"):
+                return False
+            enabled = self.client.enable("UIDONLY")
+        except IMAPClient.Error as exc:
+            raise YahooImapError(f"ENABLE UIDONLY failed: {exc}") from exc
         self._uidonly_enabled = any(b"UIDONLY" in cap.upper() for cap in enabled)
         return self._uidonly_enabled
 

@@ -33,6 +33,64 @@ def test_spot_check_selects_folder_and_fails_closed(monkeypatch):
     assert error and "missing or unreadable" in error
 
 
+def test_reconcile_prunes_missing_cached_uids_before_spot_check(store):
+    store.upsert_messages([make_message(uid=1), make_message(uid=2)])
+
+    class Client:
+        def search(self, criteria):
+            assert criteria == ["UID", "1:2"]
+            return [2]
+
+    class Imap(RetryImap):
+        client = Client()
+
+        def select_folder(self, folder, readonly=True):
+            assert (folder, readonly) == ("Inbox", True)
+            return {b"UIDVALIDITY": 100}
+
+    rows = list(
+        store.conn.execute(
+            "SELECT * FROM messages WHERE account = 'personal' ORDER BY uid"
+        ).fetchall()
+    )
+    live_rows, pruned, error = execute._reconcile_target_rows(
+        Imap(),
+        store,
+        "personal",
+        "Inbox",
+        rows,
+        expected_uidvalidity=100,
+    )
+
+    assert error is None
+    assert pruned == 1
+    assert [row["uid"] for row in live_rows] == [2]
+    assert store.message_count("personal") == 1
+
+
+def test_reconcile_fails_closed_on_uidvalidity_change(store):
+    store.upsert_messages([make_message(uid=1)])
+
+    class Imap(RetryImap):
+        def select_folder(self, _folder, readonly=True):
+            return {b"UIDVALIDITY": 101}
+
+    rows = list(store.conn.execute("SELECT * FROM messages").fetchall())
+    live_rows, pruned, error = execute._reconcile_target_rows(
+        Imap(),
+        store,
+        "personal",
+        "Inbox",
+        rows,
+        expected_uidvalidity=100,
+    )
+
+    assert live_rows == []
+    assert pruned == 0
+    assert error and "UIDVALIDITY changed" in error
+    assert store.message_count("personal") == 1
+
+
 def test_move_counts_only_confirmed_source_uids(store):
     store.upsert_messages([make_message(uid=1), make_message(uid=2)])
 

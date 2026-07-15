@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .. import safety
 from ..app import AppContext
-from ..imap.actions import move_to_archive, move_to_trash
+from ..imap.actions import MOVE_CHUNK, _chunk_uid_set, move_to_archive, move_to_trash
 from ..imap.client import YahooImapError
 from ..imap.scanner import _parse_fetch_responses, _raw_uid_fetch
 from ..unsubscribe import unsubscribe_domain
@@ -24,6 +24,64 @@ from .annotations import DESTRUCTIVE_REMOTE, READ_ONLY_LOCAL
 logger = logging.getLogger(__name__)
 
 SPOT_CHECK_SAMPLE = 3
+
+
+def _enable_uidonly(imap, account: str) -> None:
+    """Enable Yahoo full-folder UID access when the server supports it."""
+    try:
+        imap.enable_uidonly()
+    except YahooImapError as exc:
+        raise YahooImapError(
+            f"Cannot safely reconcile all message UIDs for {account}: {exc}"
+        ) from exc
+
+
+def _reconcile_target_rows(
+    imap,
+    store,
+    account: str,
+    folder: str,
+    rows: list,
+    expected_uidvalidity: int,
+) -> tuple[list, int, str | None]:
+    """Remove cached source UIDs that no longer exist before safety sampling."""
+    info = imap.with_retry(
+        f"select {folder} for source reconciliation",
+        lambda: imap.select_folder(folder, readonly=True),
+    )
+    live_uidvalidity = int(info[b"UIDVALIDITY"])
+    if live_uidvalidity != expected_uidvalidity:
+        return (
+            [],
+            0,
+            (
+                f"UIDVALIDITY changed for {account}/{folder} "
+                f"(scanned {expected_uidvalidity}, live {live_uidvalidity}). Rescan first."
+            ),
+        )
+
+    requested_uids = sorted({int(row["uid"]) for row in rows})
+    existing_uids: set[int] = set()
+    for chunk in _chunk_uid_set(requested_uids, MOVE_CHUNK):
+        existing_uids.update(
+            imap.with_retry(
+                f"reconcile source UIDs in {folder}",
+                lambda c=chunk: imap.client.search(["UID", c]),
+            )
+        )
+
+    stale_uids = [uid for uid in requested_uids if uid not in existing_uids]
+    if stale_uids:
+        store.mark_deleted(account, folder, stale_uids)
+        logger.info(
+            "Pruned %d stale cached UIDs before moving messages from %s/%s",
+            len(stale_uids),
+            account,
+            folder,
+        )
+
+    live_rows = [row for row in rows if int(row["uid"]) in existing_uids]
+    return live_rows, len(stale_uids), None
 
 
 def _spot_check(
@@ -157,6 +215,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             by_target[(row["account"], row["folder"], row["uidvalidity"])].append(row)
 
         moved_total = 0
+        pruned_total = 0
         skipped: list[dict] = []
         for (account, folder, uidvalidity), target_rows in by_target.items():
             try:
@@ -165,6 +224,23 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 skipped.append({"account": account, "folder": folder, "reason": str(exc)})
                 continue
             try:
+                _enable_uidonly(imap, account)
+                target_rows, pruned, reconcile_err = _reconcile_target_rows(
+                    imap,
+                    ctx.store,
+                    account,
+                    folder,
+                    target_rows,
+                    uidvalidity,
+                )
+                pruned_total += pruned
+                if reconcile_err:
+                    skipped.append(
+                        {"account": account, "folder": folder, "reason": reconcile_err}
+                    )
+                    continue
+                if not target_rows:
+                    continue
                 check_err = _spot_check(imap, account, folder, target_rows, uidvalidity)
                 if check_err:
                     skipped.append({"account": account, "folder": folder, "reason": check_err})
@@ -192,6 +268,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         return {
             result_key: moved_total,
             "requested": total,
+            "stale_cache_entries_pruned": pruned_total,
             "skipped": skipped,
             "note": (
                 "Messages were moved to Trash, not permanently deleted."
