@@ -20,6 +20,7 @@ Message bodies and attachments are never downloaded or indexed.
 - Scans very large Yahoo mailboxes without downloading message bodies.
 - Resumes interrupted historical scans and incrementally picks up new mail.
 - Browses and searches cached sender, subject, date, size, and unsubscribe data.
+- Lists one-click, mailto, and manual unsubscribe candidates without exposing URLs.
 - Groups activity by account and exact sender domain.
 - Supports Keep, Needs Review, Archive, Delete, and Unsubscribe decisions.
 - Moves deleted mail to Trash without permanent expunge.
@@ -122,6 +123,9 @@ Read-only exploration:
 > Show the largest sender groups for account `personal`, including counts,
 > recent dates, and available unsubscribe methods.
 
+> Show one-click unsubscribe candidates for account `personal`, sorted by
+> message count. Do not unsubscribe yet.
+
 Safe review:
 
 > Tag `newsletter.example.com` as Archive for account `personal`. Do not execute
@@ -139,6 +143,7 @@ Read and scan:
 - `get_scan_status`, `triage_new_mail`
 - `list_recent_messages`, `search_messages`, `get_message_headers`
 - `list_sender_groups`, `get_sender_detail`
+- `list_unsubscribe_candidates`
 
 Review and mutation:
 
@@ -160,6 +165,8 @@ paths are unsafe over the network.
 - Live UIDVALIDITY and sender domains are checked before moves.
 - One-click unsubscribe blocks private addresses, unrelated domains, DNS
   rebinding, and redirects.
+- Candidate listings identify advertised methods; execution repeats final
+  endpoint and DNS safety validation.
 - Destructive actions are written to the SQLite audit log.
 - Browse tools do not expose raw unsubscribe URLs.
 

@@ -12,6 +12,8 @@ versioning once stable releases begin.
 - Add authenticated Streamable HTTP deployment for Railway and Notion.
 - Add durable background scan jobs and recoverable Archive actions.
 - Publish MCP safety annotations for read, write, and destructive tools.
+- Add a privacy-safe, account-scoped tool for listing one-click, mailto, and
+  manual unsubscribe candidates.
 
 ## 0.1.0 - 2026-07-14
 

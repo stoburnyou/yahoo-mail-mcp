@@ -107,6 +107,11 @@ Then run a bounded first scan:
 > Start a background scan of at most 100 Inbox messages for account `personal`.
 > Do not modify any mail.
 
+After the scan completes:
+
+> Show one-click unsubscribe candidates for account `personal`, sorted by
+> message count. Do not unsubscribe yet.
+
 ## Troubleshooting
 
 ### Host not allowed

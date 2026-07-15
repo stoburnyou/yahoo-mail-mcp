@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from ..analysis import messages
+from ..analysis import messages, unsubscribe_candidates
 from ..app import AppContext
 from ..store.db import VALID_DECISIONS
+from .account_scope import resolve_account
 from .annotations import READ_ONLY_LOCAL
 
 
@@ -103,6 +104,54 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 exclude_stale=exclude_stale,
             )
         )
+
+    @mcp.tool(annotations=READ_ONLY_LOCAL)
+    def list_unsubscribe_candidates(
+        account: str | None = None,
+        method: str = "all",
+        sort: str = "count",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """List sender domains with cached unsubscribe methods for one account.
+
+        `method` is all, one_click, mailto, or manual. One-click candidates
+        advertise RFC 8058 support and an HTTPS endpoint, but final DNS, domain,
+        and network safety validation occurs only during execute_decisions.
+        Raw unsubscribe URLs and sender addresses are never returned.
+        """
+        try:
+            account_name = resolve_account(ctx, account)
+            page, total, page_limit, page_offset = (
+                unsubscribe_candidates.list_unsubscribe_candidates(
+                    ctx.store.conn,
+                    account=account_name,
+                    method=method,
+                    sort=sort,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            return {
+                "error": str(exc),
+                "count": 0,
+                "total": 0,
+                "candidates": [],
+            }
+        return {
+            "account": account_name,
+            "method": method,
+            "count": len(page),
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+            "candidates": page,
+            "safety_note": (
+                "One-click entries are advertised candidates. Endpoint and DNS "
+                "safety are revalidated during execution."
+            ),
+        }
 
     @mcp.tool(annotations=READ_ONLY_LOCAL)
     def get_message_headers(account: str, folder: str, uid: int) -> dict:

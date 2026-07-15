@@ -112,9 +112,11 @@ def test_remote_tools_exclude_file_access_and_publish_safety_annotations(store):
     assert "export_review_csv" not in tools
     assert "import_review_csv" not in tools
     assert tools["list_recent_messages"].annotations.readOnlyHint is True
+    assert tools["list_unsubscribe_candidates"].annotations.readOnlyHint is True
     assert tools["set_decisions"].annotations.destructiveHint is False
     assert tools["execute_decisions"].annotations.destructiveHint is True
     assert "account" in tools["set_decisions"].inputSchema["properties"]
+    assert "method" in tools["list_unsubscribe_candidates"].inputSchema["properties"]
     assert "account" in tools["preview_cleanup"].inputSchema["properties"]
     assert "account" in tools["execute_decisions"].inputSchema["properties"]
 
