@@ -1,0 +1,29 @@
+[project]
+name = "yahoo-mail-mcp"
+version = "0.1.0"
+description = "MCP server for auditing and cleaning up Yahoo Mail accounts over IMAP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.2.0",
+    "imapclient>=3.0.1",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "tldextract>=5.1",
+]
+
+[project.scripts]
+yahoo-mail-mcp = "yahoo_mail_mcp.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yahoo_mail_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
