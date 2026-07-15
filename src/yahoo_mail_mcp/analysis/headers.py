@@ -8,11 +8,6 @@ from dataclasses import dataclass
 from email import policy
 from email.parser import BytesHeaderParser
 
-import tldextract
-
-# Bundled public-suffix snapshot only; never fetch the list over the network.
-_extract = tldextract.TLDExtract(suffix_list_urls=())
-
 _parser = BytesHeaderParser(policy=policy.default)
 
 
@@ -29,14 +24,16 @@ class ParsedHeaders:
     one_click: bool
 
 
-def registrable_domain(email_addr: str) -> str | None:
-    """news@e.marketing.example.com -> example.com (falls back to full host)."""
+def sender_domain(email_addr: str) -> str | None:
+    """Return the exact normalized domain after ``@``.
+
+    Keeping subdomains distinct prevents a decision for one mail stream (for
+    example, ``news.vendor.com``) from affecting unrelated streams hosted
+    under the same registrable domain.
+    """
     if "@" not in email_addr:
         return None
     host = email_addr.rsplit("@", 1)[1].lower().strip().strip(">")
-    ext = _extract(host)
-    if ext.domain and ext.suffix:
-        return f"{ext.domain}.{ext.suffix}"
     return host or None
 
 
@@ -58,14 +55,14 @@ def parse_headers(raw: bytes) -> ParsedHeaders:
 
     sender_email = None
     sender_name = None
-    sender_domain = None
+    domain = None
     from_value = str(msg.get("From", "") or "")
     if from_value:
         name, addr = email.utils.parseaddr(from_value)
         if addr:
             sender_email = addr.lower()
             sender_name = name or None
-            sender_domain = registrable_domain(sender_email)
+            domain = sender_domain(sender_email)
 
     subject = str(msg.get("Subject", "") or "").strip() or None
 
@@ -92,7 +89,7 @@ def parse_headers(raw: bytes) -> ParsedHeaders:
 
     return ParsedHeaders(
         sender_email=sender_email,
-        sender_domain=sender_domain,
+        sender_domain=domain,
         sender_name=sender_name,
         subject=subject,
         date=date_iso,

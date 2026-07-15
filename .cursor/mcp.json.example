@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "yahoo-mail": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/yahoo-mail-mcp",
+        "yahoo-mail-mcp"
+      ]
+    }
+  }
+}

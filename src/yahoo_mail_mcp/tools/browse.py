@@ -1,0 +1,123 @@
+"""Read-only tools for browsing scanned message headers."""
+
+from __future__ import annotations
+
+from mcp.server.fastmcp import FastMCP
+
+from ..analysis import messages
+from ..app import AppContext
+from ..store.db import VALID_DECISIONS
+
+
+def _page_result(page: tuple[list[dict], int, int, int]) -> dict:
+    rows, total, limit, offset = page
+    return {
+        "count": len(rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "messages": rows,
+    }
+
+
+def register(mcp: FastMCP, ctx: AppContext) -> None:
+    @mcp.tool()
+    def list_recent_messages(
+        account: str | None = None,
+        folder: str | None = None,
+        since: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        include_sender_email: bool = False,
+    ) -> dict:
+        """List recently scanned messages using cached headers only.
+
+        Run scan_mailbox first. Results include account, folder, UID,
+        UIDVALIDITY and a staleness field. Sender email is hidden by default;
+        raw unsubscribe links and message bodies are never returned.
+        """
+        account_name = ctx.account(account).name if account else None
+        return _page_result(
+            messages.list_recent_messages(
+                ctx.store.conn,
+                account=account_name,
+                folder=folder,
+                since=since,
+                limit=limit,
+                offset=offset,
+                include_sender_email=include_sender_email,
+            )
+        )
+
+    @mcp.tool()
+    def search_messages(
+        query: str | None = None,
+        sender_domain: str | None = None,
+        sender_email: str | None = None,
+        subject_contains: str | None = None,
+        account: str | None = None,
+        folder: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        has_unsubscribe: bool | None = None,
+        decision: str | None = None,
+        sort: str = "recent",
+        limit: int = 50,
+        offset: int = 0,
+        include_sender_email: bool = False,
+        exclude_stale: bool = False,
+    ) -> dict:
+        """Search cached message headers without connecting to IMAP.
+
+        Free-text query matches subject, sender domain and sender email.
+        Additional exact filters can narrow account, folder, sender, date,
+        unsubscribe availability and decision. List results never expose raw
+        unsubscribe URLs or message bodies.
+        """
+        if decision is not None and decision not in VALID_DECISIONS:
+            return {
+                "error": f"decision must be one of {VALID_DECISIONS}",
+                "count": 0,
+                "total": 0,
+                "messages": [],
+            }
+        account_name = ctx.account(account).name if account else None
+        return _page_result(
+            messages.search_messages(
+                ctx.store.conn,
+                query=query,
+                sender_domain=sender_domain,
+                sender_email=sender_email,
+                subject_contains=subject_contains,
+                account=account_name,
+                folder=folder,
+                since=since,
+                until=until,
+                has_unsubscribe=has_unsubscribe,
+                decision=decision,
+                sort=sort,
+                limit=limit,
+                offset=offset,
+                include_sender_email=include_sender_email,
+                exclude_stale=exclude_stale,
+            )
+        )
+
+    @mcp.tool()
+    def get_message_headers(account: str, folder: str, uid: int) -> dict:
+        """Get the cached headers for one exact account/folder/UID reference.
+
+        Includes sender, subject, date, size, decision and safe unsubscribe
+        method names. It never returns raw unsubscribe links or a message body.
+        """
+        account_name = ctx.account(account).name
+        detail = messages.get_message_headers(
+            ctx.store.conn, account=account_name, folder=folder, uid=uid
+        )
+        if detail is None:
+            return {
+                "error": (
+                    f"No scanned message for account {account_name!r}, folder {folder!r}, UID {uid}"
+                )
+            }
+        return detail

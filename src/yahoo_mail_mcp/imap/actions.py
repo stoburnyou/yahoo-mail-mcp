@@ -50,6 +50,7 @@ def move_to_trash(
     if trash is None:
         raise YahooImapError(f"No \\Trash folder found for {account}")
     if folder == trash:
+        store.mark_deleted(account, folder, uids)
         return 0
 
     info = imap.with_retry(f"select {folder}", lambda: imap.select_folder(folder, readonly=False))
@@ -63,17 +64,38 @@ def move_to_trash(
 
     moved = 0
     for chunk in _chunk_uid_set(sorted(uids), MOVE_CHUNK):
-        def do_move(c=chunk):
+        requested = _expand_chunk(chunk)
+        existing_before = set(
+            imap.with_retry(
+                f"verify source UIDs in {folder}",
+                lambda c=chunk: imap.client.search(["UID", c]),
+            )
+        )
+        missing_before = [uid for uid in requested if uid not in existing_before]
+        if missing_before:
+            store.mark_deleted(account, folder, missing_before)
+        if not existing_before:
+            continue
+        move_chunk = _chunk_uid_set(sorted(existing_before), MOVE_CHUNK)[0]
+
+        def do_move(c=move_chunk):
             ll = imap.client._imap  # noqa: SLF001 - imapclient.move lacks chunk control
             typ, data = ll.uid("MOVE", c, f'"{trash}"')
             if typ != "OK":
                 raise YahooImapError(f"UID MOVE failed: {typ} {data}")
 
         imap.with_retry(f"move {folder} -> Trash", do_move)
-        chunk_uids = _expand_chunk(chunk)
-        store.mark_deleted(account, folder, chunk_uids)
-        moved += len(chunk_uids)
-        logger.info("Moved %d messages from %s/%s to Trash", len(chunk_uids), account, folder)
+        remaining = set(
+            imap.with_retry(
+                f"verify moved UIDs left {folder}",
+                lambda c=move_chunk: imap.client.search(["UID", c]),
+            )
+        )
+        confirmed = [uid for uid in existing_before if uid not in remaining]
+        if confirmed:
+            store.mark_deleted(account, folder, confirmed)
+        moved += len(confirmed)
+        logger.info("Moved %d messages from %s/%s to Trash", len(confirmed), account, folder)
     return moved
 
 

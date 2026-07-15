@@ -6,12 +6,28 @@ from yahoo_mail_mcp.analysis import grouping
 def seed(store):
     rows = [
         make_message(uid=1),
-        make_message(uid=2, subject="Weekly deals", one_click=1,
-                     unsub_http="https://bigstore.com/u", date="2024-08-01T00:00:00+00:00"),
-        make_message(uid=3, account="work", folder="Inbox",
-                     sender_email="news@bigstore.com", date="2023-01-01T00:00:00+00:00"),
-        make_message(uid=4, sender_email="friend@gmail.com", sender_domain="gmail.com",
-                     subject="hey", list_unsub_raw=None, unsub_mailto=None),
+        make_message(
+            uid=2,
+            subject="Weekly deals",
+            one_click=1,
+            unsub_http="https://bigstore.com/u",
+            date="2024-08-01T00:00:00+00:00",
+        ),
+        make_message(
+            uid=3,
+            account="work",
+            folder="Inbox",
+            sender_email="news@bigstore.com",
+            date="2023-01-01T00:00:00+00:00",
+        ),
+        make_message(
+            uid=4,
+            sender_email="friend@gmail.com",
+            sender_domain="gmail.com",
+            subject="hey",
+            list_unsub_raw=None,
+            unsub_mailto=None,
+        ),
     ]
     store.upsert_messages(rows)
 
@@ -39,8 +55,12 @@ def test_decision_filter_and_account_filter(store):
     seed(store)
     store.set_decision("bigstore.com", "delete")
 
-    assert [g["sender_domain"] for g in grouping.list_sender_groups(store.conn, decision="delete")] == ["bigstore.com"]
-    assert [g["sender_domain"] for g in grouping.list_sender_groups(store.conn, decision="needs_review")] == ["gmail.com"]
+    assert [
+        g["sender_domain"] for g in grouping.list_sender_groups(store.conn, decision="delete")
+    ] == ["bigstore.com"]
+    assert [
+        g["sender_domain"] for g in grouping.list_sender_groups(store.conn, decision="needs_review")
+    ] == ["gmail.com"]
 
     work_only = grouping.list_sender_groups(store.conn, account="work")
     assert len(work_only) == 1

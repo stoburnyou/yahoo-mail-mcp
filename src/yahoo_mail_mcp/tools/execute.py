@@ -13,7 +13,6 @@ from collections import defaultdict
 from mcp.server.fastmcp import FastMCP
 
 from .. import safety
-from ..analysis.headers import registrable_domain
 from ..app import AppContext
 from ..imap.actions import move_to_trash
 from ..imap.client import YahooImapError
@@ -25,9 +24,25 @@ logger = logging.getLogger(__name__)
 SPOT_CHECK_SAMPLE = 3
 
 
-def _spot_check(imap, account: str, folder: str, rows: list) -> str | None:
+def _spot_check(
+    imap,
+    account: str,
+    folder: str,
+    rows: list,
+    expected_uidvalidity: int,
+) -> str | None:
     """Fetch a few of the messages about to be deleted and verify their From
     domain still matches what we scanned. Returns an error string on mismatch."""
+    info = imap.with_retry(
+        f"select {folder} for spot check",
+        lambda: imap.select_folder(folder, readonly=True),
+    )
+    live_uidvalidity = int(info[b"UIDVALIDITY"])
+    if live_uidvalidity != expected_uidvalidity:
+        return (
+            f"UIDVALIDITY changed for {account}/{folder} "
+            f"(scanned {expected_uidvalidity}, live {live_uidvalidity}). Rescan first."
+        )
     sample = rows[:: max(1, len(rows) // SPOT_CHECK_SAMPLE)][:SPOT_CHECK_SAMPLE]
     for row in sample:
         responses = imap.with_retry(
@@ -36,10 +51,13 @@ def _spot_check(imap, account: str, folder: str, rows: list) -> str | None:
         )
         records = _parse_fetch_responses(responses)
         if not records:
-            continue  # message already gone; the MOVE will simply skip it
+            return (
+                f"Spot check failed in {account}/{folder}: UID {row['uid']} "
+                "is missing or unreadable. Rescan before deleting."
+            )
         live_domain = records[0]["sender_domain"]
         expected = row["sender_domain"]
-        if live_domain and live_domain != expected:
+        if live_domain != expected:
             return (
                 f"Spot check failed in {account}/{folder}: UID {row['uid']} is now from "
                 f"{live_domain!r}, expected {expected!r}. UIDs may be stale - rescan this folder."
@@ -60,7 +78,9 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             return {"error": "decision must be 'delete' or 'unsubscribe'"}
         result = safety.preview(ctx.store, decision)
         result["threshold"] = ctx.settings.delete_threshold
-        result["confirm_required"] = result["total_messages"] > ctx.settings.delete_threshold
+        result["confirm_required"] = (
+            decision == "delete" and result["total_messages"] > ctx.settings.delete_threshold
+        )
         return result
 
     @mcp.tool()
@@ -99,7 +119,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                     ),
                     "total_messages": total,
                 }
-            err = safety.validate_token(ctx.store, confirm_token, "delete", total)
+            err = safety.validate_token(ctx.store, confirm_token, "delete", rows)
             if err:
                 return {"error": err, "total_messages": total}
 
@@ -116,13 +136,17 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 skipped.append({"account": account, "folder": folder, "reason": str(exc)})
                 continue
             try:
-                check_err = _spot_check(imap, account, folder, target_rows)
+                check_err = _spot_check(imap, account, folder, target_rows, uidvalidity)
                 if check_err:
                     skipped.append({"account": account, "folder": folder, "reason": check_err})
                     continue
                 moved = move_to_trash(
-                    imap, ctx.store, account, folder,
-                    [r["uid"] for r in target_rows], uidvalidity,
+                    imap,
+                    ctx.store,
+                    account,
+                    folder,
+                    [r["uid"] for r in target_rows],
+                    uidvalidity,
                 )
                 deleted += moved
                 ctx.store.log_action(

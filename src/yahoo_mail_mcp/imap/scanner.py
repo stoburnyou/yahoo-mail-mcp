@@ -28,9 +28,19 @@ HEADER_FIELDS = "FROM SUBJECT DATE LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST"
 FETCH_PARTS = f"(UID INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})])"
 
 _UIDFETCH_PREFIX_RE = re.compile(rb"^(\d+)\s+UIDFETCH\b", re.IGNORECASE)
+_BARE_UID_PREFIX_RE = re.compile(rb"^(\d+)\s+\(")
 _UID_ATTR_RE = re.compile(rb"\bUID (\d+)")
 _SIZE_RE = re.compile(rb"RFC822\.SIZE (\d+)")
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"')
+
+
+def _looks_like_bare_fetch(item: object) -> bool:
+    if not isinstance(item, bytes):
+        return False
+    upper = item.upper()
+    return b"BODY[" in upper and bool(
+        b"FETCH" in upper or _UID_ATTR_RE.search(item) or _BARE_UID_PREFIX_RE.match(item)
+    )
 
 
 @dataclass
@@ -83,9 +93,15 @@ def _parse_fetch_responses(responses: list) -> list[dict]:
     """
     out: list[dict] = []
     for item in responses:
-        if not isinstance(item, tuple) or len(item) < 2:
+        if isinstance(item, tuple) and len(item) >= 2:
+            prefix, header_blob = item[0], item[1]
+        elif _looks_like_bare_fetch(item):
+            # A valid header fetch can return BODY[...] NIL instead of a
+            # literal. Preserve the message metadata with empty headers rather
+            # than silently skipping its UID.
+            prefix, header_blob = item, b""
+        else:
             continue
-        prefix, header_blob = item[0], item[1]
 
         uid = None
         m = _UIDFETCH_PREFIX_RE.match(prefix)
@@ -95,6 +111,10 @@ def _parse_fetch_responses(responses: list) -> list[dict]:
             m = _UID_ATTR_RE.search(prefix)
             if m:
                 uid = int(m.group(1))
+            else:
+                m = _BARE_UID_PREFIX_RE.match(prefix)
+                if m:
+                    uid = int(m.group(1))
         if uid is None:
             continue
 
@@ -131,6 +151,15 @@ def _parse_fetch_responses(responses: list) -> list[dict]:
     return out
 
 
+def _fetch_response_count(responses: list) -> int:
+    return sum(
+        1
+        for item in responses
+        if (isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], bytes))
+        or (_looks_like_bare_fetch(item))
+    )
+
+
 def _persist_batch(
     store: Store, account: str, folder: str, uidvalidity: int, records: list[dict]
 ) -> None:
@@ -151,6 +180,8 @@ def scan_folder(
     max_messages: int | None = None,
 ) -> FolderScanResult:
     result = FolderScanResult(folder=folder)
+    if max_messages is not None and max_messages < 1:
+        return result
 
     uidonly = False
     try:
@@ -164,6 +195,12 @@ def scan_folder(
     exists = int(info.get(b"EXISTS", 0))
     result.total_in_folder = exists
 
+    if not uidonly and imap.message_limit and exists >= imap.message_limit:
+        raise YahooImapError(
+            f"{folder!r} reached Yahoo's limited-mode cap of {imap.message_limit} messages, "
+            "but UIDONLY could not be enabled. Refusing to mark an incomplete scan as done."
+        )
+
     if imap.message_limit:
         batch_size = min(batch_size, max(1, imap.message_limit - 1))
 
@@ -171,94 +208,144 @@ def scan_folder(
     if ckpt is not None and ckpt["uidvalidity"] != uidvalidity:
         logger.warning(
             "UIDVALIDITY changed for %s/%s (%s -> %s); restarting scan",
-            account, folder, ckpt["uidvalidity"], uidvalidity,
+            account,
+            folder,
+            ckpt["uidvalidity"],
+            uidvalidity,
         )
+        store.clear_folder_messages(account, folder)
         store.clear_checkpoint(account, folder)
         ckpt = None
 
     scanned_before = ckpt["scanned"] if ckpt else 0
+    current_low: int | None
 
-    if ckpt is not None and ckpt["done"]:
-        # Folder fully scanned before: only fetch new mail above the old high mark.
+    if ckpt is not None and ckpt["phase"] == "incremental":
+        # Resume an interrupted ascending pass through a fixed new-mail range.
+        phase = "incremental"
+        low_bound = int(ckpt["low_uid"])
+        high = int(ckpt["high_uid"])
+        current_low = low_bound
+        high_mark = high
+    elif ckpt is not None and ckpt["done"]:
+        # Historical mail is complete. Scan new mail oldest-first so a capped
+        # run can safely advance a contiguous high-water mark.
+        phase = "incremental"
         low_bound = int(ckpt["high_uid"]) + 1
         high = uidnext - 1
+        current_low = low_bound
+        high_mark = high
         if high < low_bound:
             result.done = True
             result.skipped = scanned_before
             return result
-        prior_high = int(ckpt["high_uid"])
-        prior_low = ckpt["low_uid"]
-    elif ckpt is not None:
-        # Resume interrupted walk downward from the last low-water mark.
+    else:
+        # Initial or resumed historical scan: walk downward, and keep the
+        # original high-water mark fixed so mail arriving mid-scan is picked up
+        # by the later incremental phase rather than silently skipped.
+        phase = "historical"
         low_bound = 1
-        high = int(ckpt["low_uid"]) - 1
-        prior_high = int(ckpt["high_uid"])
-        prior_low = ckpt["low_uid"]
+        high = int(ckpt["low_uid"]) - 1 if ckpt is not None else uidnext - 1
+        current_low = (
+            int(ckpt["low_uid"]) if ckpt is not None and ckpt["low_uid"] is not None else None
+        )
+        high_mark = int(ckpt["high_uid"]) if ckpt is not None else uidnext - 1
         if high < 1:
-            store.save_checkpoint(account, folder, uidvalidity, 1, prior_high, True, scanned_before)
+            store.save_checkpoint(
+                account,
+                folder,
+                uidvalidity,
+                1,
+                high_mark,
+                True,
+                scanned_before,
+                phase="complete",
+            )
             result.done = True
             result.skipped = scanned_before
             return result
-    else:
-        low_bound = 1
-        high = uidnext - 1
-        prior_high = uidnext - 1
-        prior_low = None
-        if high < 1:
-            store.save_checkpoint(account, folder, uidvalidity, 1, 0, True, 0)
-            result.done = True
-            return result
 
     scanned_this_run = 0
-    current_low = prior_low
-    high_mark = max(prior_high, uidnext - 1)
 
-    while high >= low_bound:
+    while low_bound <= high:
+        fetch_size = batch_size
+        if max_messages is not None:
+            remaining = max_messages - scanned_this_run
+            if remaining <= 0:
+                break
+            fetch_size = min(fetch_size, remaining)
+
         uid_range = f"{low_bound}:{high}"
         if uidonly:
-            fetch = lambda r=uid_range: _raw_uid_fetch(imap, r, partial=f"-1:-{batch_size}")
+            fetch_range = uid_range
+            fetch_partial = f"1:{fetch_size}" if phase == "incremental" else f"-1:-{fetch_size}"
         else:
-            window_low = max(low_bound, high - batch_size + 1)
-            fetch = lambda r=f"{window_low}:{high}": _raw_uid_fetch(imap, r)
+            fetch_partial = None
+            if phase == "incremental":
+                window_high = min(high, low_bound + fetch_size - 1)
+                fetch_range = f"{low_bound}:{window_high}"
+            else:
+                window_low = max(low_bound, high - fetch_size + 1)
+                fetch_range = f"{window_low}:{high}"
+
+        def fetch() -> list:
+            return _raw_uid_fetch(imap, fetch_range, partial=fetch_partial)
+
         responses = imap.with_retry(f"fetch {folder} {uid_range}", fetch)
         records = _parse_fetch_responses(responses)
+        response_count = _fetch_response_count(responses)
+        if response_count != len(records):
+            raise YahooImapError(
+                f"Could not parse all FETCH responses in {folder!r} "
+                f"({len(records)} of {response_count}); checkpoint not advanced"
+            )
 
         if records:
             _persist_batch(store, account, folder, uidvalidity, records)
             scanned_this_run += len(records)
-            batch_low = min(r["uid"] for r in records)
-        elif uidonly:
-            # Empty response in PARTIAL mode means nothing left below `high`.
-            batch_low = low_bound
+            batch_edge = (
+                max(r["uid"] for r in records)
+                if phase == "incremental"
+                else min(r["uid"] for r in records)
+            )
         else:
-            batch_low = max(low_bound, high - batch_size + 1)
+            batch_edge = high if phase == "incremental" else low_bound
 
-        current_low = batch_low if current_low is None else min(current_low, batch_low)
-        finished = batch_low <= low_bound or (uidonly and not records)
-        store.save_checkpoint(
-            account,
-            folder,
-            uidvalidity,
-            current_low,
-            high_mark,
-            finished,
-            scanned_before + scanned_this_run,
-        )
+        if phase == "incremental":
+            next_low = batch_edge + 1
+            finished = not records or next_low > high
+            store.save_checkpoint(
+                account,
+                folder,
+                uidvalidity,
+                1 if finished else next_low,
+                high_mark,
+                finished,
+                scanned_before + scanned_this_run,
+                phase="complete" if finished else "incremental",
+            )
+            low_bound = next_low
+        else:
+            current_low = batch_edge if current_low is None else min(current_low, batch_edge)
+            finished = not records or batch_edge <= low_bound
+            store.save_checkpoint(
+                account,
+                folder,
+                uidvalidity,
+                current_low,
+                high_mark,
+                finished,
+                scanned_before + scanned_this_run,
+                phase="complete" if finished else "historical",
+            )
+            high = batch_edge - 1
+
         if finished:
             result.done = True
-            break
-        high = batch_low - 1
-        if max_messages is not None and scanned_this_run >= max_messages:
             break
 
     result.scanned = scanned_this_run
     result.skipped = scanned_before
-    if high < low_bound and not result.done:
-        store.save_checkpoint(
-            account, folder, uidvalidity, current_low or low_bound, high_mark, True,
-            scanned_before + scanned_this_run,
-        )
-        result.done = True
     return result
 
 
@@ -274,6 +361,8 @@ def scan_mailbox(
     max_messages: int | None = None,
 ) -> ScanReport:
     report = ScanReport(account=account)
+    if max_messages is not None and max_messages < 1:
+        raise ValueError("max_messages must be a positive integer")
 
     if folders:
         targets = folders
@@ -285,8 +374,13 @@ def scan_mailbox(
             targets.append(info.name)
 
     for folder in targets:
+        remaining = None
+        if max_messages is not None:
+            remaining = max_messages - report.total_scanned
+            if remaining <= 0:
+                break
         try:
-            folder_result = scan_folder(imap, store, account, folder, batch_size, max_messages)
+            folder_result = scan_folder(imap, store, account, folder, batch_size, remaining)
         except YahooImapError as exc:
             logger.error("Scan of %s/%s failed: %s", account, folder, exc)
             folder_result = FolderScanResult(folder=folder, error=str(exc))

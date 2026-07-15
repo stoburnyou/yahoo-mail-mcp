@@ -21,23 +21,60 @@ def test_preview_counts_and_token(store):
 def test_token_single_use(store):
     seed_tagged(store, 10)
     token = safety.preview(store, "delete")["confirm_token"]
-    assert safety.validate_token(store, token, "delete", 10) is None
-    err = safety.validate_token(store, token, "delete", 10)
+    rows = safety.pending_messages(store.conn, "delete")
+    assert safety.validate_token(store, token, "delete", rows) is None
+    err = safety.validate_token(store, token, "delete", rows)
     assert err and "already-used" in err
 
 
 def test_token_wrong_decision(store):
     seed_tagged(store, 10)
     token = safety.preview(store, "delete")["confirm_token"]
-    err = safety.validate_token(store, token, "unsubscribe", 10)
+    rows = safety.pending_messages(store.conn, "delete")
+    err = safety.validate_token(store, token, "unsubscribe", rows)
     assert err and "issued for decision" in err
+
+
+def test_token_expires(store):
+    seed_tagged(store, 10)
+    token = safety.preview(store, "delete")["confirm_token"]
+    store.conn.execute(
+        "UPDATE confirm_tokens SET created_at = ? WHERE token = ?",
+        ("2000-01-01T00:00:00+00:00", token),
+    )
+    store.conn.commit()
+
+    rows = safety.pending_messages(store.conn, "delete")
+    err = safety.validate_token(store, token, "delete", rows)
+    assert err and "expired" in err
 
 
 def test_token_drift_rejected(store):
     seed_tagged(store, 100)
     token = safety.preview(store, "delete")["confirm_token"]
-    err = safety.validate_token(store, token, "delete", 200)
+    rows = safety.pending_messages(store.conn, "delete")
+    err = safety.validate_token(store, token, "delete", rows * 2)
     assert err and "changed since preview" in err
+
+
+def test_token_rejects_changed_messages_at_same_count(store):
+    seed_tagged(store, 10)
+    token = safety.preview(store, "delete")["confirm_token"]
+    store.mark_deleted("personal", "Inbox", [1])
+    store.upsert_messages(
+        [
+            make_message(
+                uid=11,
+                sender_email="alerts@bigstore.com",
+                sender_domain="bigstore.com",
+            )
+        ]
+    )
+
+    rows = safety.pending_messages(store.conn, "delete")
+    assert len(rows) == 10
+    err = safety.validate_token(store, token, "delete", rows)
+    assert err and "Affected messages" in err
 
 
 def test_pending_excludes_untagged_and_deleted(store):

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from imapclient import IMAPClient
 
+from .. import __version__
 from ..config import IMAP_HOST, IMAP_PORT, Account
 
 logger = logging.getLogger(__name__)
@@ -57,12 +58,14 @@ class YahooImap:
         client = IMAPClient(IMAP_HOST, port=IMAP_PORT, ssl=True, timeout=120)
         client.login(self.account.email, self.account.app_password)
         try:
-            client.id_({
-                "name": "yahoo-mail-mcp",
-                "version": "0.1.0",
-                "os": platform.system(),
-                "os-version": platform.release(),
-            })
+            client.id_(
+                {
+                    "name": "yahoo-mail-mcp",
+                    "version": __version__,
+                    "os": platform.system(),
+                    "os-version": platform.release(),
+                }
+            )
         except Exception:  # noqa: BLE001 - ID is best-effort
             logger.debug("IMAP ID command failed (non-fatal)", exc_info=True)
 
@@ -71,8 +74,8 @@ class YahooImap:
         self._selected_folder = None
         self.message_limit = self._probe_message_limit()
         logger.info(
-            "Connected to Yahoo IMAP as %s (MESSAGELIMIT=%s)",
-            self.account.email,
+            "Connected Yahoo account %s (MESSAGELIMIT=%s)",
+            self.account.name,
             self.message_limit,
         )
 
@@ -100,10 +103,10 @@ class YahooImap:
             self._client = None
 
     def _reconnect(self) -> None:
+        restore_uidonly = self._uidonly_enabled
         self.close()
         self.connect()
-        if self._uidonly_enabled:
-            self._uidonly_enabled = False
+        if restore_uidonly:
             self.enable_uidonly()
 
     def with_retry(self, op_name: str, fn):
@@ -135,7 +138,9 @@ class YahooImap:
                         self.select_folder(folder, readonly=readonly)
                 except Exception:  # noqa: BLE001 - retry loop handles it
                     logger.warning("Reconnect attempt failed", exc_info=True)
-        raise YahooImapError(f"{op_name} failed after {MAX_RECONNECT_ATTEMPTS} attempts: {last_exc}")
+        raise YahooImapError(
+            f"{op_name} failed after {MAX_RECONNECT_ATTEMPTS} attempts: {last_exc}"
+        )
 
     # -- capabilities / modes -------------------------------------------------
 
@@ -178,7 +183,15 @@ class YahooImap:
                 )
             except IMAPClient.Error:
                 # Some virtual folders refuse STATUS; report them without counts.
-                result.append(FolderInfo(name=name, special_use=special, messages=None, uidnext=None, uidvalidity=None))
+                result.append(
+                    FolderInfo(
+                        name=name,
+                        special_use=special,
+                        messages=None,
+                        uidnext=None,
+                        uidvalidity=None,
+                    )
+                )
         return result
 
     def find_special_folder(self, special_use: str) -> str | None:

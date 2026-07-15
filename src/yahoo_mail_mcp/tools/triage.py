@@ -76,7 +76,9 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 attention.append(summary)
 
         ctx.store.log_action(
-            "triage", account=acct.name, count=len(new_rows),
+            "triage",
+            account=acct.name,
+            count=len(new_rows),
             detail=f"{len(new_senders)} new senders, {len(attention)} flagged",
         )
 

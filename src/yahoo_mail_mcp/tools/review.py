@@ -78,7 +78,9 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             domain = (entry.get("domain") or "").strip().lower()
             decision = (entry.get("decision") or "").strip().lower()
             if not domain or decision not in VALID_DECISIONS:
-                errors.append(f"Invalid entry: {entry!r} (decision must be one of {VALID_DECISIONS})")
+                errors.append(
+                    f"Invalid entry: {entry!r} (decision must be one of {VALID_DECISIONS})"
+                )
                 continue
             ctx.store.set_decision(domain, decision, notes=entry.get("notes"))
             applied.append({"domain": domain, "decision": decision})
@@ -93,9 +95,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         and re-import with import_review_csv.
         """
         groups = grouping.list_sender_groups(ctx.store.conn, limit=1_000_000)
-        decisions_notes = {
-            row["sender_domain"]: row["notes"] for row in ctx.store.get_decisions()
-        }
+        decisions_notes = {row["sender_domain"]: row["notes"] for row in ctx.store.get_decisions()}
         out = Path(path).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w", newline="") as fh:
@@ -114,7 +114,9 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                         "unsubscribe_methods": ";".join(g["unsubscribe"]["methods"]),
                         "accounts": ";".join(g["accounts"]),
                         "sender_addresses": ";".join(g["sender_addresses"]),
-                        "sample_subjects": " | ".join(s.replace("|", "/") for s in g["sample_subjects"]),
+                        "sample_subjects": " | ".join(
+                            s.replace("|", "/") for s in g["sample_subjects"]
+                        ),
                         "notes": decisions_notes.get(g["sender_domain"]) or "",
                     }
                 )
@@ -141,7 +143,9 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 if decision not in VALID_DECISIONS:
                     errors.append(f"Row {i}: invalid decision {decision!r}")
                     continue
-                ctx.store.set_decision(domain, decision, notes=(row.get("notes") or None), source="csv")
+                ctx.store.set_decision(
+                    domain, decision, notes=(row.get("notes") or None), source="csv"
+                )
                 applied += 1
         ctx.store.log_action("import_review_csv", count=applied, detail=str(src))
         return {"applied": applied, "errors": errors}

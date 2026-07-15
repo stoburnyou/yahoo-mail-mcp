@@ -1,4 +1,4 @@
-from yahoo_mail_mcp.imap.scanner import _parse_fetch_responses
+from yahoo_mail_mcp.imap.scanner import _fetch_response_count, _parse_fetch_responses
 
 HEADERS = (
     b"From: Deals <deals@bigstore.com>\r\n"
@@ -19,6 +19,7 @@ def test_parse_normal_fetch_response():
         b")",
     ]
     records = _parse_fetch_responses(responses)
+    assert _fetch_response_count(responses) == 1
     assert len(records) == 1
     rec = records[0]
     assert rec["uid"] == 4567
@@ -60,3 +61,16 @@ def test_missing_date_falls_back_to_internaldate():
     ]
     records = _parse_fetch_responses(responses)
     assert records[0]["date"].startswith("2024-07-01T10:31:00")
+
+
+def test_parse_nil_header_response_preserves_uid():
+    responses = [
+        b'99 (INTERNALDATE "01-Jul-2024 10:31:00 +0000" '
+        b"RFC822.SIZE 10 BODY[HEADER.FIELDS (...)] NIL)"
+    ]
+
+    records = _parse_fetch_responses(responses)
+    assert _fetch_response_count(responses) == 1
+    assert len(records) == 1
+    assert records[0]["uid"] == 99
+    assert records[0]["sender_domain"] is None

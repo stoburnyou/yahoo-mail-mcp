@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from .store.db import Store
 
 # If the live count drifts more than this fraction from the previewed count,
 # the confirm token is rejected and a fresh preview is required.
 DRIFT_TOLERANCE = 0.05
+CONFIRM_TOKEN_TTL = timedelta(minutes=15)
+
+
+def _snapshot_hash(rows: list[sqlite3.Row]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            (
+                f"{row['account']}\0{row['folder']}\0{row['uid']}\0"
+                f"{row['uidvalidity']}\0{row['sender_domain']}\n"
+            ).encode()
+        )
+    return digest.hexdigest()
 
 
 def pending_messages(conn: sqlite3.Connection, decision: str) -> list[sqlite3.Row]:
@@ -36,7 +51,7 @@ def preview(store: Store, decision: str) -> dict:
 
     total = len(rows)
     token = secrets.token_hex(8)
-    store.save_confirm_token(token, decision, total)
+    store.save_confirm_token(token, decision, total, _snapshot_hash(rows))
 
     return {
         "decision": decision,
@@ -47,21 +62,36 @@ def preview(store: Store, decision: str) -> dict:
     }
 
 
-def validate_token(store: Store, token: str, decision: str, live_total: int) -> str | None:
+def validate_token(
+    store: Store, token: str, decision: str, live_rows: list[sqlite3.Row]
+) -> str | None:
     """Return an error string if the token is invalid, else None (token consumed)."""
     row = store.pop_confirm_token(token)
     if row is None:
         return "Unknown or already-used confirm_token. Run preview_cleanup to get a fresh one."
+    try:
+        created_at = datetime.fromisoformat(row["created_at"])
+    except (TypeError, ValueError):
+        return "confirm_token has an invalid timestamp. Run preview_cleanup again."
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - created_at > CONFIRM_TOKEN_TTL:
+        return "confirm_token expired after 15 minutes. Run preview_cleanup again."
     if row["decision"] != decision:
         return (
             f"confirm_token was issued for decision {row['decision']!r}, not {decision!r}. "
             "Run preview_cleanup again."
         )
     previewed = int(row["total"])
+    live_total = len(live_rows)
     allowed_drift = max(1, int(previewed * DRIFT_TOLERANCE))
     if abs(live_total - previewed) > allowed_drift:
         return (
             f"Affected message count changed since preview ({previewed} -> {live_total}, "
             f"more than {DRIFT_TOLERANCE:.0%} drift). Run preview_cleanup again."
+        )
+    if not row["snapshot_hash"] or row["snapshot_hash"] != _snapshot_hash(live_rows):
+        return (
+            "Affected messages or sender domains changed since preview. Run preview_cleanup again."
         )
     return None

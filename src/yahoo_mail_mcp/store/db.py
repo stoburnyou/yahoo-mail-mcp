@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,10 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_domain ON messages (sender_domain);
 CREATE INDEX IF NOT EXISTS idx_messages_account_domain ON messages (account, sender_domain);
+CREATE INDEX IF NOT EXISTS idx_messages_active_date
+  ON messages (account, folder, date) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_active_account_date
+  ON messages (account, date) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS decisions (
   sender_domain TEXT PRIMARY KEY,
@@ -46,6 +51,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   low_uid      INTEGER,             -- lowest UID fetched so far (scan walks downward)
   high_uid     INTEGER,             -- highest UID seen when the scan started
   done         INTEGER NOT NULL DEFAULT 0,
+  phase        TEXT NOT NULL DEFAULT 'historical',
   scanned      INTEGER NOT NULL DEFAULT 0,
   updated_at   TEXT NOT NULL,
   PRIMARY KEY (account, folder)
@@ -55,6 +61,7 @@ CREATE TABLE IF NOT EXISTS confirm_tokens (
   token      TEXT PRIMARY KEY,
   decision   TEXT NOT NULL,
   total      INTEGER NOT NULL,
+  snapshot_hash TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -68,6 +75,11 @@ CREATE TABLE IF NOT EXISTS action_log (
   count      INTEGER,
   detail     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 
@@ -77,11 +89,83 @@ def utcnow() -> str:
 
 class Store:
     def __init__(self, db_path: Path):
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name == "posix":
+            db_path.parent.chmod(0o700)
+        if not db_path.exists():
+            fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        if os.name == "posix":
+            db_path.chmod(0o600)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{db_path}{suffix}")
+            if os.name == "posix" and sidecar.exists():
+                sidecar.chmod(0o600)
         self.conn.executescript(SCHEMA)
+        self._ensure_checkpoint_phase()
+        self._ensure_confirm_snapshot()
+        self._migrate_sender_domains()
+
+    def _ensure_checkpoint_phase(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(checkpoints)")}
+        if "phase" not in columns:
+            self.conn.execute(
+                "ALTER TABLE checkpoints ADD COLUMN phase TEXT NOT NULL DEFAULT 'historical'"
+            )
+            self.conn.execute("UPDATE checkpoints SET phase = 'complete' WHERE done = 1")
+            # Older code could save a capped incremental scan as done=0,
+            # low_uid=1, then skip the remainder on resume. That state cannot
+            # be distinguished safely from corruption, so force a rescan.
+            self.conn.execute("DELETE FROM checkpoints WHERE done = 0 AND low_uid <= 1")
+            self.conn.commit()
+
+    def _ensure_confirm_snapshot(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(confirm_tokens)")}
+        if "snapshot_hash" not in columns:
+            self.conn.execute("ALTER TABLE confirm_tokens ADD COLUMN snapshot_hash TEXT")
+            self.conn.commit()
+
+    def _migrate_sender_domains(self) -> None:
+        """One-time migration from registrable to exact sender domains."""
+        key = "sender_domain_format"
+        row = self.conn.execute("SELECT value FROM schema_meta WHERE key = ?", (key,)).fetchone()
+        if row is not None and row["value"] == "exact-v2":
+            return
+        decision_count = self.conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+        self.conn.execute(
+            """
+            UPDATE messages
+            SET sender_domain = lower(
+              substr(sender_email, instr(sender_email, '@') + 1)
+            )
+            WHERE sender_email IS NOT NULL
+              AND instr(sender_email, '@') > 0
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO schema_meta (key, value) VALUES (?, ?)
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value
+            """,
+            (key, "exact-v2"),
+        )
+        if decision_count:
+            self.conn.execute("DELETE FROM decisions")
+            self.conn.execute(
+                """
+                INSERT INTO action_log (ts, action, count, detail)
+                VALUES (?, 'invalidate_legacy_decisions', ?, ?)
+                """,
+                (
+                    utcnow(),
+                    decision_count,
+                    "Sender-domain format changed; decisions require review",
+                ),
+            )
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -127,6 +211,13 @@ class Store:
         )
         self.conn.commit()
 
+    def clear_folder_messages(self, account: str, folder: str) -> None:
+        self.conn.execute(
+            "DELETE FROM messages WHERE account = ? AND folder = ?",
+            (account, folder),
+        )
+        self.conn.commit()
+
     def message_count(self, account: str | None = None) -> int:
         sql = "SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL"
         params: list = []
@@ -151,20 +242,34 @@ class Store:
         high_uid: int | None,
         done: bool,
         scanned: int,
+        phase: str = "historical",
     ) -> None:
         self.conn.execute(
             """
-            INSERT INTO checkpoints (account, folder, uidvalidity, low_uid, high_uid, done, scanned, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO checkpoints (
+              account, folder, uidvalidity, low_uid, high_uid, done, phase, scanned, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (account, folder) DO UPDATE SET
               uidvalidity = excluded.uidvalidity,
               low_uid = excluded.low_uid,
               high_uid = excluded.high_uid,
               done = excluded.done,
+              phase = excluded.phase,
               scanned = excluded.scanned,
               updated_at = excluded.updated_at
             """,
-            (account, folder, uidvalidity, low_uid, high_uid, int(done), scanned, utcnow()),
+            (
+                account,
+                folder,
+                uidvalidity,
+                low_uid,
+                high_uid,
+                int(done),
+                phase,
+                scanned,
+                utcnow(),
+            ),
         )
         self.conn.commit()
 
@@ -176,7 +281,9 @@ class Store:
 
     # -- decisions ---------------------------------------------------------------
 
-    def set_decision(self, domain: str, decision: str, notes: str | None = None, source: str = "mcp") -> None:
+    def set_decision(
+        self, domain: str, decision: str, notes: str | None = None, source: str = "mcp"
+    ) -> None:
         if decision not in VALID_DECISIONS:
             raise ValueError(f"Invalid decision {decision!r}; must be one of {VALID_DECISIONS}")
         self.conn.execute(
@@ -202,17 +309,19 @@ class Store:
 
     # -- confirm tokens ----------------------------------------------------------
 
-    def save_confirm_token(self, token: str, decision: str, total: int) -> None:
+    def save_confirm_token(self, token: str, decision: str, total: int, snapshot_hash: str) -> None:
         self.conn.execute(
-            "INSERT INTO confirm_tokens (token, decision, total, created_at) VALUES (?, ?, ?, ?)",
-            (token, decision, total, utcnow()),
+            """
+            INSERT INTO confirm_tokens (
+              token, decision, total, snapshot_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (token, decision, total, snapshot_hash, utcnow()),
         )
         self.conn.commit()
 
     def pop_confirm_token(self, token: str) -> sqlite3.Row | None:
-        row = self.conn.execute(
-            "SELECT * FROM confirm_tokens WHERE token = ?", (token,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM confirm_tokens WHERE token = ?", (token,)).fetchone()
         if row is not None:
             self.conn.execute("DELETE FROM confirm_tokens WHERE token = ?", (token,))
             self.conn.commit()

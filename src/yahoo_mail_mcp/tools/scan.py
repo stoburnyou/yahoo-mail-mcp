@@ -10,6 +10,15 @@ from ..app import AppContext
 from ..imap.scanner import scan_mailbox as run_scan
 
 
+def _safe_connection_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "authentication" in message or "invalid credentials" in message:
+        return "Authentication failed. Verify the Yahoo email and app password."
+    if "timeout" in message or "timed out" in message:
+        return "Yahoo IMAP connection timed out. Try again later."
+    return "Yahoo IMAP connection failed. Check the server logs for details."
+
+
 def register(mcp: FastMCP, ctx: AppContext) -> None:
     @mcp.tool()
     def list_accounts() -> dict:
@@ -33,7 +42,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                     for f in imap.list_folders()
                 ]
             except Exception as exc:  # noqa: BLE001 - report per-account failures
-                entry["error"] = str(exc)
+                entry["error"] = _safe_connection_error(exc)
             out.append(entry)
         return {"accounts": out}
 
@@ -55,9 +64,20 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         `folders` to scan specific ones, or `max_messages` to cap this run
         (useful for a first validation pass).
         """
-        imap = ctx.imap(account)
         acct = ctx.account(account)
-        report = run_scan(imap, ctx.store, acct.name, folders, ctx.settings.batch_size, max_messages)
+        try:
+            imap = ctx.imap(account)
+        except Exception as exc:  # noqa: BLE001 - return a privacy-safe tool error
+            return {
+                "account": acct.name,
+                "error": _safe_connection_error(exc),
+                "total_scanned_this_run": 0,
+                "folders": [],
+                "messages_in_database": ctx.store.message_count(acct.name),
+            }
+        report = run_scan(
+            imap, ctx.store, acct.name, folders, ctx.settings.batch_size, max_messages
+        )
         return {
             "account": acct.name,
             "total_scanned_this_run": report.total_scanned,

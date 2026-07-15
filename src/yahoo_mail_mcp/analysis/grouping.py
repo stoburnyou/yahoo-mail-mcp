@@ -13,7 +13,9 @@ SORT_COLUMNS = {
 }
 
 
-def _group_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row, sample_subjects: int = 5) -> dict:
+def _group_row_to_dict(
+    conn: sqlite3.Connection, row: sqlite3.Row, sample_subjects: int = 5
+) -> dict:
     domain = row["sender_domain"]
     addresses = [
         r[0]
@@ -125,7 +127,9 @@ def list_sender_groups(
     return [_group_row_to_dict(conn, row) for row in rows]
 
 
-def get_sender_detail(conn: sqlite3.Connection, domain: str, sample_subjects: int = 20) -> dict | None:
+def get_sender_detail(
+    conn: sqlite3.Connection, domain: str, sample_subjects: int = 20
+) -> dict | None:
     sql = _GROUP_SQL + " AND m.sender_domain = ? GROUP BY m.sender_domain"
     row = conn.execute(sql, (domain.lower(),)).fetchone()
     if row is None:

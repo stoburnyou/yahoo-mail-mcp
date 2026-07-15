@@ -67,10 +67,23 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
                     app_password=entry["app_password"].replace(" ", ""),
                 )
             )
+        names = [account.name.lower() for account in accounts]
+        emails = [account.email.lower() for account in accounts]
+        identifiers = names + emails
+        if len(set(names)) != len(names):
+            raise ValueError("YAHOO_ACCOUNTS account names must be unique")
+        if len(set(emails)) != len(emails):
+            raise ValueError("YAHOO_ACCOUNTS email addresses must be unique")
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("YAHOO_ACCOUNTS names must not collide with account email addresses")
 
     db_path = Path(os.environ.get("YAHOO_MAIL_MCP_DB") or DEFAULT_DB_PATH).expanduser()
     threshold = int(os.environ.get("YAHOO_MAIL_MCP_DELETE_THRESHOLD") or DEFAULT_DELETE_THRESHOLD)
     batch_size = int(os.environ.get("YAHOO_MAIL_MCP_BATCH_SIZE") or DEFAULT_BATCH_SIZE)
+    if threshold < 1:
+        raise ValueError("YAHOO_MAIL_MCP_DELETE_THRESHOLD must be at least 1")
+    if batch_size < 1:
+        raise ValueError("YAHOO_MAIL_MCP_BATCH_SIZE must be at least 1")
 
     return Settings(
         accounts=accounts,

@@ -1,7 +1,7 @@
 from yahoo_mail_mcp.analysis.headers import (
     parse_headers,
     parse_list_unsubscribe,
-    registrable_domain,
+    sender_domain,
 )
 
 RAW = b"""From: "Big Store" <deals@e.bigstore.com>\r
@@ -16,7 +16,7 @@ List-Unsubscribe-Post: List-Unsubscribe=One-Click\r
 def test_parse_headers_full():
     p = parse_headers(RAW)
     assert p.sender_email == "deals@e.bigstore.com"
-    assert p.sender_domain == "bigstore.com"
+    assert p.sender_domain == "e.bigstore.com"
     assert p.sender_name == "Big Store"
     assert p.subject == "50% off everything!"
     assert p.date.startswith("2024-07-01T10:30:00")
@@ -40,15 +40,13 @@ def test_parse_headers_garbage():
     assert p.sender_domain is None
 
 
-def test_registrable_domain():
-    assert registrable_domain("a@news.mailer.example.co.uk") == "example.co.uk"
-    assert registrable_domain("a@example.com") == "example.com"
-    assert registrable_domain("not-an-email") is None
+def test_sender_domain_preserves_subdomains():
+    assert sender_domain("a@news.mailer.example.co.uk") == "news.mailer.example.co.uk"
+    assert sender_domain("a@example.com") == "example.com"
+    assert sender_domain("not-an-email") is None
 
 
 def test_parse_list_unsubscribe_order_independent():
-    mailto, http = parse_list_unsubscribe(
-        "<https://x.com/u>, <mailto:stop@x.com>"
-    )
+    mailto, http = parse_list_unsubscribe("<https://x.com/u>, <mailto:stop@x.com>")
     assert mailto == "mailto:stop@x.com"
     assert http == "https://x.com/u"
