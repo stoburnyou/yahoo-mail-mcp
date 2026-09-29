@@ -80,7 +80,51 @@ Expected response:
 This health route is public and contains no account data. All requests to
 `/mcp` require HTTPS, an allowed Host header, and the bearer token.
 
-## 6. Connect Notion
+## 6. Optional private Yahoo SMTP relay
+
+If the MCP service can read Yahoo Mail but cannot open outbound SMTP
+connections to Yahoo, deploy a second private service from the same image with
+this start command:
+
+```text
+yahoo-smtp-relay
+```
+
+Give the relay its own public HTTPS domain and configure only these variables
+on the relay service:
+
+```env
+YAHOO_SMTP_RELAY_SECRET=relay-shared-secret-at-least-32-characters
+YAHOO_SMTP_RELAY_SMTP_HOST=smtp.mail.yahoo.com
+YAHOO_SMTP_RELAY_SMTP_PORT=587
+YAHOO_SMTP_RELAY_ATTACHMENT_HOST_SUFFIXES=.dropboxusercontent.com,.dropbox.com
+```
+
+The relay exposes only `GET /health` and `POST /send`. It does not expose any
+mailbox delete, move, archive, trash, or expunge operation. `POST /send`
+requires `Authorization: Bearer <YAHOO_SMTP_RELAY_SECRET>`.
+
+Then configure the MCP service with a separate client-side copy of the relay
+secret:
+
+```env
+YAHOO_MAIL_MCP_RELAY_URL=https://your-relay-service.up.railway.app
+YAHOO_MAIL_MCP_RELAY_SECRET=relay-shared-secret-at-least-32-characters
+```
+
+Keep `YAHOO_MAIL_MCP_RELAY_SECRET` distinct from
+`YAHOO_MAIL_MCP_BEARER_TOKEN`. The normal mail flow remains:
+
+```text
+preview_send_email -> explicit user approval -> send_email -> relay HTTPS -> Yahoo SMTP
+```
+
+The relay validates recipient lists, subject, body, attachment sizes, and
+attachment URL host allowlists before SMTP send. Audit logs avoid message body,
+subject text, full recipient addresses, attachment URLs, and Yahoo app
+passwords.
+
+## 7. Connect Notion
 
 1. Ask a workspace administrator to enable custom MCP servers under
    **Settings → Notion AI → AI connectors**.
@@ -160,3 +204,4 @@ resume.
 - Rotate Yahoo app passwords and the bearer token after suspected exposure.
 - Never expose `/mcp` without authentication.
 - Test Archive, Delete, and Unsubscribe on a small, carefully selected sample.
+

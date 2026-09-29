@@ -30,6 +30,7 @@ dependencies = [
 [project.scripts]
 yahoo-mail-mcp = "yahoo_mail_mcp.server:main"
 yahoo-mail-mcp-http = "yahoo_mail_mcp.http:main"
+yahoo-smtp-relay = "yahoo_mail_mcp.relay:main"
 
 [project.urls]
 Homepage = "https://github.com/ktrann24/yahoo-mail-mcp"
@@ -71,3 +72,4 @@ ignore_missing_imports = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
+

@@ -9,18 +9,13 @@ import json
 import mimetypes
 import os
 import secrets
-import smtplib
-import ssl
 import time
-from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from mcp.server.fastmcp import FastMCP
 
 from ..app import AppContext
-from ..config import SMTP_HOST, SMTP_PORT
 from ..imap.actions import move_to_archive, move_to_trash
 from ..imap.client import YahooImapError
 from .annotations import DESTRUCTIVE_REMOTE, READ_ONLY_REMOTE
@@ -29,6 +24,7 @@ TOKEN_TTL = 15 * 60
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024
 DROPBOX_SUFFIXES = (".dropboxusercontent.com", ".dropbox.com")
+RELAY_TIMEOUT_SECONDS = 45
 
 
 def _secret() -> bytes:
@@ -52,14 +48,20 @@ def _make_token(kind: str, payload: dict) -> str:
     }
     raw = _canonical(env)
     sig = hmac.new(_secret(), raw, hashlib.sha256).digest()
-    enc = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+    def enc(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
     return enc(raw) + "." + enc(sig)
 
 
 def _check_token(token: str, kind: str, payload: dict) -> str | None:
     try:
         a, b = token.split(".", 1)
-        dec = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+        def dec(value: str) -> bytes:
+            return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
         raw, sig = dec(a), dec(b)
         if not hmac.compare_digest(sig, hmac.new(_secret(), raw, hashlib.sha256).digest()):
             return "Invalid confirmation token"
@@ -134,16 +136,36 @@ def _validate_send(p: dict) -> list[str]:
     return errors
 
 
-def _download(a: dict) -> bytes:
-    req = Request(a["url"], headers={"User-Agent": "yahoo-mail-mcp/1.0"})
-    with urlopen(req, timeout=30) as resp:  # noqa: S310 - validated host above
-        data = resp.read(MAX_ATTACHMENT_BYTES + 1)
-    if len(data) > MAX_ATTACHMENT_BYTES:
-        raise ValueError(f"Attachment {a['filename']!r} is too large")
-    expected = int(a.get("size_bytes") or 0)
-    if expected and len(data) != expected:
-        raise ValueError(f"Attachment {a['filename']!r} size changed")
-    return data
+def _relay_config() -> tuple[str, str]:
+    url = os.environ.get("YAHOO_MAIL_MCP_RELAY_URL", "").strip().rstrip("/")
+    secret = os.environ.get("YAHOO_MAIL_MCP_RELAY_SECRET", "").strip()
+    if not url:
+        raise RuntimeError("YAHOO_MAIL_MCP_RELAY_URL is not configured")
+    if not url.startswith("https://") and not url.startswith("http://localhost"):
+        raise RuntimeError("YAHOO_MAIL_MCP_RELAY_URL must use HTTPS")
+    if len(secret) < 32:
+        raise RuntimeError("YAHOO_MAIL_MCP_RELAY_SECRET must be at least 32 characters")
+    return url, secret
+
+
+def _relay_send(payload: dict) -> dict:
+    base_url, secret = _relay_config()
+    req = Request(
+        f"{base_url}/send",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+            "User-Agent": "yahoo-mail-mcp/relay-client",
+        },
+        method="POST",
+    )
+    with urlopen(req, timeout=RELAY_TIMEOUT_SECONDS) as resp:  # noqa: S310 - URL is operator configured.
+        data = resp.read(64 * 1024)
+    result = json.loads(data.decode("utf-8"))
+    if not isinstance(result, dict):
+        raise RuntimeError("Relay returned an invalid response")
+    return result
 
 
 def _indexed_uidvalidity(ctx: AppContext, account: str, folder: str, uid: int) -> int:
@@ -221,47 +243,44 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         if err:
             return {"sent": False, "error": err}
 
-        msg = EmailMessage()
         display = os.environ.get("YAHOO_MAIL_MCP_FROM_NAME", "").strip()
-        msg["From"] = formataddr((display, acct.email)) if display else acct.email
-        msg["To"] = ", ".join(p["to"])
-        if p["cc"]:
-            msg["Cc"] = ", ".join(p["cc"])
-        msg["Subject"] = p["subject"]
-        msg["Message-ID"] = make_msgid(domain=acct.email.split("@")[-1])
-        if p["in_reply_to"]:
-            msg["In-Reply-To"] = p["in_reply_to"]
-        if p["references"]:
-            msg["References"] = p["references"]
-        msg.set_content(_signed_body(p["body_text"], p["append_signature"]))
-        if p["body_html"]:
-            msg.add_alternative(p["body_html"], subtype="html")
+        relay_payload = {
+            "account": acct.name,
+            "from_email": acct.email,
+            "from_name": display,
+            "app_password": acct.app_password,
+            "to": p["to"],
+            "cc": p["cc"],
+            "bcc": p["bcc"],
+            "subject": p["subject"],
+            "body_text": _signed_body(p["body_text"], p["append_signature"]),
+            "body_html": p["body_html"],
+            "attachments": p["attachments"],
+            "in_reply_to": p["in_reply_to"],
+            "references": p["references"],
+        }
+        result = _relay_send(relay_payload)
+        if not result.get("sent"):
+            return {"sent": False, "error": result.get("error", "Relay send failed")}
 
-        names = []
-        for a in p["attachments"]:
-            data = _download(a)
-            ctype = a["content_type"] or mimetypes.guess_type(a["filename"])[0] or "application/octet-stream"
-            main, sub = ctype.split("/", 1)
-            msg.add_attachment(data, maintype=main, subtype=sub, filename=a["filename"])
-            names.append(a["filename"])
-
-        recipients = p["to"] + p["cc"] + p["bcc"]
-        # Prefer STARTTLS on 587 for cloud hosting environments where implicit
-        # TLS/465 may be blocked or stall. Yahoo supports both transports.
-        with smtplib.SMTP(SMTP_HOST, 587, timeout=20) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.ehlo()
-            smtp.login(acct.email, acct.app_password)
-            smtp.send_message(msg, from_addr=acct.email, to_addrs=recipients)
-
+        names = [a["filename"] for a in p["attachments"]]
         ctx.store.log_action("send_email", account=acct.name, count=1,
-                             detail=json.dumps({"to": p["to"], "cc": p["cc"],
-                                                "subject": p["subject"],
-                                                "attachments": names}, ensure_ascii=False))
+                             detail=json.dumps({"to_count": len(p["to"]),
+                                                "cc_count": len(p["cc"]),
+                                                "bcc_count": len(p["bcc"]),
+                                                "subject_sha256": hashlib.sha256(
+                                                    p["subject"].encode("utf-8")
+                                                ).hexdigest(),
+                                                "attachment_count": len(names),
+                                                "attachment_names_sha256": [
+                                                    hashlib.sha256(
+                                                        name.encode("utf-8")
+                                                    ).hexdigest()
+                                                    for name in names
+                                                ]}, ensure_ascii=False))
         return {"sent": True, "from": acct.email, "to": p["to"], "cc": p["cc"],
                 "subject": p["subject"], "attachments": names,
-                "message_id": msg["Message-ID"]}
+                "message_id": result.get("message_id")}
 
     @mcp.tool(annotations=READ_ONLY_REMOTE)
     def preview_message_action(
@@ -343,3 +362,4 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 "uid": int(uid), "destination_folder": p["destination_folder"] or None,
                 "note": "Trash is recoverable; no permanent expunge is performed."
                     if action == "trash" else None}
+
