@@ -84,4 +84,3 @@ def test_relay_requires_strong_secret(monkeypatch):
 
     with pytest.raises(ValueError, match="at least 32"):
         relay.create_relay_app()
-

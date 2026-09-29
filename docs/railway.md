@@ -204,4 +204,3 @@ resume.
 - Rotate Yahoo app passwords and the bearer token after suspected exposure.
 - Never expose `/mcp` without authentication.
 - Test Archive, Delete, and Unsubscribe on a small, carefully selected sample.
-

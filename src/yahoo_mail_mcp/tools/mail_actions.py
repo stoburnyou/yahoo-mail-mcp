@@ -362,4 +362,3 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 "uid": int(uid), "destination_folder": p["destination_folder"] or None,
                 "note": "Trash is recoverable; no permanent expunge is performed."
                     if action == "trash" else None}
-
