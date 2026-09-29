@@ -15,33 +15,43 @@ from .tools import browse, execute, review, scan, triage
 
 def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> FastMCP:
     ctx = ctx or AppContext()
-    decision_step = "set_decisions" if remote else "set_decisions (or export/import CSV)"
+
+    if remote:
+        instructions = (
+            "Read-only Yahoo Mail tools. Use list_accounts, scan tools, "
+            "list_recent_messages/search_messages, get_message_headers, and "
+            "get_message_body. Remote mode intentionally exposes no mailbox "
+            "mutation, archive, delete, or unsubscribe execution tools."
+        )
+    else:
+        instructions = (
+            "Tools for auditing and cleaning up Yahoo Mail accounts over IMAP. "
+            "Typical flow: list_accounts -> scan_mailbox -> browse/review -> "
+            "preview_cleanup -> execute_decisions. Mailbox mutations require "
+            "explicit local execution."
+        )
+
     mcp = FastMCP(
         "yahoo-mail-mcp",
-        instructions=(
-            "Tools for auditing and cleaning up Yahoo Mail accounts over IMAP. "
-            "Typical flow: list_accounts -> scan_mailbox (or start_scan_job for "
-            "remote, long-running scans) -> list_recent_messages "
-            "or search_messages -> list_sender_groups or "
-            "list_unsubscribe_candidates -> "
-            f"{decision_step} -> preview_cleanup -> execute_decisions. "
-            "Nothing is archived, deleted, or unsubscribed until execute_decisions runs on "
-            "explicitly tagged account/domain pairs. Always name the account before "
-            "previewing or executing a mutation."
-        ),
+        instructions=instructions,
         stateless_http=remote,
         json_response=remote,
-        # The HTTP entrypoint enforces an explicit Host allowlist and bearer
-        # token before requests reach MCP.
         transport_security=(
             TransportSecuritySettings(enable_dns_rebinding_protection=False) if remote else None
         ),
     )
+
+    # Safe read-only tools are available in both local and hosted modes.
     scan.register(mcp, ctx)
     browse.register(mcp, ctx)
-    review.register(mcp, ctx, include_file_tools=not remote)
-    execute.register(mcp, ctx)
-    triage.register(mcp, ctx)
+
+    # Hosted ChatGPT access is intentionally read-only. Keep all mutation
+    # and decision-execution tooling local unless explicitly redesigned later.
+    if not remote:
+        review.register(mcp, ctx, include_file_tools=True)
+        execute.register(mcp, ctx)
+        triage.register(mcp, ctx)
+
     return mcp
 
 
