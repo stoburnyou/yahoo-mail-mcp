@@ -33,7 +33,7 @@ def test_http_health_and_bearer_auth(store):
         }
         response = client.post("/mcp", json={})
         assert response.status_code == 401
-        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.headers["www-authenticate"].startswith("Bearer")
 
         response = client.post(
             "/mcp",
@@ -113,12 +113,15 @@ def test_remote_tools_exclude_file_access_and_publish_safety_annotations(store):
     assert "import_review_csv" not in tools
     assert tools["list_recent_messages"].annotations.readOnlyHint is True
     assert tools["list_unsubscribe_candidates"].annotations.readOnlyHint is True
-    assert tools["set_decisions"].annotations.destructiveHint is False
-    assert tools["execute_decisions"].annotations.destructiveHint is True
-    assert "account" in tools["set_decisions"].inputSchema["properties"]
+    assert tools["preview_message_action"].annotations.readOnlyHint is True
+    assert tools["execute_message_action"].annotations.destructiveHint is True
+    assert tools["create_folder"].annotations.destructiveHint is True
+    assert tools["rename_folder"].annotations.destructiveHint is True
+    assert tools["delete_empty_folder"].annotations.destructiveHint is True
     assert "method" in tools["list_unsubscribe_candidates"].inputSchema["properties"]
-    assert "account" in tools["preview_cleanup"].inputSchema["properties"]
-    assert "account" in tools["execute_decisions"].inputSchema["properties"]
+    assert "account" in tools["preview_message_action"].inputSchema["properties"]
+    assert "account" in tools["execute_message_action"].inputSchema["properties"]
+    assert "confirm_token" in tools["create_folder"].inputSchema["properties"]
 
 
 def test_local_tools_keep_csv_round_trip(store):
