@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import AppContext
-from .tools import browse, execute, mail_actions, review, scan, triage
+from .tools import browse, execute, folders, mail_actions, review, scan, triage
 
 
 def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> FastMCP:
@@ -21,8 +21,9 @@ def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> Fast
             "Yahoo Mail assistant tools. Read/search operations are safe by default. "
             "Outbound email and mailbox mutations use an explicit two-step "
             "preview -> user approval -> execute flow. Trash is recoverable and "
-            "permanent expunge is not exposed. Attachments may be supplied using "
-            "short-lived Dropbox download URLs."
+            "permanent expunge is not exposed. Folder create/rename/delete-empty "
+            "actions also require preview tokens and never move or delete messages. "
+            "Attachments may be supplied using short-lived Dropbox download URLs."
         )
     else:
         instructions = (
@@ -49,6 +50,7 @@ def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> Fast
     if remote:
         # Hosted write tools are deliberately narrow and require preview tokens.
         mail_actions.register(mcp, ctx)
+        folders.register(mcp, ctx)
         triage.register(mcp, ctx)
     else:
         review.register(mcp, ctx, include_file_tools=True)
