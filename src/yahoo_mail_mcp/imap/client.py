@@ -212,3 +212,50 @@ class YahooImap:
         self._selected_folder = folder
         self._selected_readonly = readonly
         return info
+
+    # -- exact read-only message retrieval -------------------------------------
+
+    def fetch_message_peek(
+        self,
+        folder: str,
+        uid: int,
+        *,
+        expected_uidvalidity: int | None = None,
+    ) -> bytes:
+        """Fetch one full RFC 822 message without setting the Seen flag.
+
+        The folder is always selected read-only and BODY.PEEK[] is used. If a
+        cached UIDVALIDITY value is supplied, refuse the read when Yahoo reports
+        a different value so a stale UID cannot silently resolve to another
+        message.
+        """
+        if uid < 1:
+            raise ValueError("uid must be at least 1")
+
+        def _fetch() -> bytes:
+            selected = self.select_folder(folder, readonly=True)
+            actual_uidvalidity = selected.get(b"UIDVALIDITY")
+            if (
+                expected_uidvalidity is not None
+                and actual_uidvalidity is not None
+                and int(actual_uidvalidity) != int(expected_uidvalidity)
+            ):
+                raise YahooImapError(
+                    "UIDVALIDITY changed for this folder; rescan before reading the message"
+                )
+
+            data = self.client.fetch([uid], ["BODY.PEEK[]"])
+            item = data.get(uid)
+            if item is None:
+                raise YahooImapError(
+                    f"Yahoo returned no message for folder {folder!r}, UID {uid}"
+                )
+
+            raw = item.get(b"BODY[]") or item.get(b"BODY.PEEK[]")
+            if not isinstance(raw, (bytes, bytearray)):
+                raise YahooImapError(
+                    f"Yahoo returned no body for folder {folder!r}, UID {uid}"
+                )
+            return bytes(raw)
+
+        return self.with_retry("fetch_message_peek", _fetch)
