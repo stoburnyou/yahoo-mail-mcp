@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .app import AppContext
-from .tools import browse, execute, review, scan, triage
+from .tools import browse, execute, mail_actions, review, scan, triage
 
 
 def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> FastMCP:
@@ -18,10 +18,11 @@ def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> Fast
 
     if remote:
         instructions = (
-            "Read-only Yahoo Mail tools. Use list_accounts, scan tools, "
-            "list_recent_messages/search_messages, get_message_headers, and "
-            "get_message_body. Remote mode intentionally exposes no mailbox "
-            "mutation, archive, delete, or unsubscribe execution tools."
+            "Yahoo Mail assistant tools. Read/search operations are safe by default. "
+            "Outbound email and mailbox mutations use an explicit two-step "
+            "preview -> user approval -> execute flow. Trash is recoverable and "
+            "permanent expunge is not exposed. Attachments may be supplied using "
+            "short-lived Dropbox download URLs."
         )
     else:
         instructions = (
@@ -45,9 +46,11 @@ def build_server(ctx: AppContext | None = None, *, remote: bool = False) -> Fast
     scan.register(mcp, ctx)
     browse.register(mcp, ctx)
 
-    # Hosted ChatGPT access is intentionally read-only. Keep all mutation
-    # and decision-execution tooling local unless explicitly redesigned later.
-    if not remote:
+    if remote:
+        # Hosted write tools are deliberately narrow and require preview tokens.
+        mail_actions.register(mcp, ctx)
+        triage.register(mcp, ctx)
+    else:
         review.register(mcp, ctx, include_file_tools=True)
         execute.register(mcp, ctx)
         triage.register(mcp, ctx)
