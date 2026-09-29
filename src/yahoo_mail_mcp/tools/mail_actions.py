@@ -246,7 +246,12 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
             names.append(a["filename"])
 
         recipients = p["to"] + p["cc"] + p["bcc"]
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context(), timeout=30) as smtp:
+        # Prefer STARTTLS on 587 for cloud hosting environments where implicit
+        # TLS/465 may be blocked or stall. Yahoo supports both transports.
+        with smtplib.SMTP(SMTP_HOST, 587, timeout=20) as smtp:
+            smtp.ehlo()
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo()
             smtp.login(acct.email, acct.app_password)
             smtp.send_message(msg, from_addr=acct.email, to_addrs=recipients)
 
