@@ -362,3 +362,72 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 "uid": int(uid), "destination_folder": p["destination_folder"] or None,
                 "note": "Trash is recoverable; no permanent expunge is performed."
                     if action == "trash" else None}
+
+
+    @mcp.tool(annotations=DESTRUCTIVE_REMOTE)
+    def bulk_move_by_sender_domains(
+        account: str,
+        source_folder: str,
+        sender_domains: list[str],
+        destination_folder: str,
+        confirm_token: str | None = None,
+    ) -> dict:
+        """Preview or move all indexed messages from exact sender domains into one folder."""
+        acct = ctx.account(account)
+        source_folder = (source_folder or "").strip()
+        destination_folder = (destination_folder or "").strip()
+        domains = sorted({d.strip().lower() for d in (sender_domains or []) if d.strip()})
+        if not source_folder or not destination_folder or not domains:
+            return {"ok": False, "error": "source_folder, destination_folder and sender_domains are required"}
+        if source_folder == destination_folder:
+            return {"ok": False, "error": "source and destination must differ"}
+
+        placeholders = ",".join("?" for _ in domains)
+        rows = ctx.store.conn.execute(
+            f"""SELECT uid,uidvalidity FROM messages
+                WHERE account=? AND folder=? AND deleted_at IS NULL
+                AND lower(sender_domain) IN ({placeholders}) ORDER BY uid""",
+            [acct.name, source_folder, *domains],
+        ).fetchall()
+        if not rows:
+            return {"ok": True, "preview": {"count": 0}, "note": "No matching messages remain."}
+        uidvs = {int(r["uidvalidity"]) for r in rows}
+        if len(uidvs) != 1:
+            return {"ok": False, "error": "Multiple UIDVALIDITY values; rescan first"}
+        uidv = next(iter(uidvs))
+        uids = [int(r["uid"]) for r in rows]
+        snap = hashlib.sha256(",".join(map(str,uids)).encode()).hexdigest()
+        p = {"account":acct.name,"source_folder":source_folder,"destination_folder":destination_folder,
+             "sender_domains":domains,"count":len(uids),"uidvalidity":uidv,"snapshot":snap}
+        if not confirm_token:
+            return {"ok": True,
+                    "preview":{"account":acct.name,"action":"bulk_move_by_sender_domains",
+                               "source_folder":source_folder,"destination_folder":destination_folder,
+                               "sender_domains":domains,"count":len(uids)},
+                    "confirm_token":_make_token("bulk_move_by_sender_domains",p),
+                    "confirm_token_expires_in_seconds":TOKEN_TTL,
+                    "note":"Nothing has been changed yet."}
+        err = _check_token(confirm_token,"bulk_move_by_sender_domains",p)
+        if err:
+            return {"ok":False,"error":err}
+
+        imap = ctx.imap(acct.name)
+        info = imap.with_retry(f"select {source_folder}", lambda: imap.select_folder(source_folder, readonly=False))
+        if int(info[b"UIDVALIDITY"]) != uidv:
+            return {"ok":False,"error":"UIDVALIDITY changed; rescan first"}
+        safe = destination_folder.replace("\\","\\\\").replace('"','\\"')
+        moved = 0
+        for start in range(0,len(uids),100):
+            chunk = uids[start:start+100]
+            seq = ",".join(map(str,chunk))
+            typ,data = imap.client._imap.uid("MOVE",seq,f'"{safe}"')
+            if typ != "OK":
+                raise YahooImapError(f"UID MOVE failed: {typ} {data}")
+            ctx.store.mark_deleted(acct.name,source_folder,chunk)
+            moved += len(chunk)
+        ctx.store.log_action("bulk_move_by_sender_domains",account=acct.name,folder=source_folder,
+                             count=moved,detail=json.dumps({"destination":destination_folder,
+                             "sender_domains":domains},sort_keys=True))
+        return {"ok":True,"action":"bulk_move_by_sender_domains","changed":moved,
+                "source_folder":source_folder,"destination_folder":destination_folder,
+                "sender_domains":domains}
