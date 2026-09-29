@@ -224,15 +224,22 @@ class YahooImap:
     ) -> bytes:
         """Fetch one full RFC 822 message without setting the Seen flag.
 
-        The folder is always selected read-only and BODY.PEEK[] is used. If a
-        cached UIDVALIDITY value is supplied, refuse the read when Yahoo reports
-        a different value so a stale UID cannot silently resolve to another
-        message.
+        Yahoo's UIDONLY extension can return UIDFETCH responses that IMAPClient
+        does not normalize correctly for a direct full-body fetch. Use the
+        underlying imaplib UID FETCH command and collect both FETCH and UIDFETCH
+        response channels, mirroring the scanner's Yahoo-specific handling.
         """
         if uid < 1:
             raise ValueError("uid must be at least 1")
 
         def _fetch() -> bytes:
+            # Enable UIDONLY when Yahoo offers it so large folders remain fully
+            # addressable, then select the target folder read-only.
+            try:
+                self.enable_uidonly()
+            except YahooImapError:
+                logger.debug("UIDONLY unavailable for exact read; continuing", exc_info=True)
+
             selected = self.select_folder(folder, readonly=True)
             actual_uidvalidity = selected.get(b"UIDVALIDITY")
             if (
@@ -244,18 +251,27 @@ class YahooImap:
                     "UIDVALIDITY changed for this folder; rescan before reading the message"
                 )
 
-            data = self.client.fetch([uid], ["BODY.PEEK[]"])
-            item = data.get(uid)
-            if item is None:
+            ll = self.client._imap  # noqa: SLF001 - needed for Yahoo UIDFETCH
+            typ, data = ll.uid("FETCH", str(uid), "(BODY.PEEK[])")
+            if typ != "OK":
                 raise YahooImapError(
-                    f"Yahoo returned no message for folder {folder!r}, UID {uid}"
+                    f"UID FETCH failed for folder {folder!r}, UID {uid}: {typ} {data}"
                 )
 
-            raw = item.get(b"BODY[]") or item.get(b"BODY.PEEK[]")
-            if not isinstance(raw, (bytes, bytearray)):
-                raise YahooImapError(
-                    f"Yahoo returned no body for folder {folder!r}, UID {uid}"
-                )
-            return bytes(raw)
+            responses: list = []
+            if data and data != [None]:
+                responses.extend(data)
+            for key in ("UIDFETCH", "uidfetch", "FETCH", "fetch"):
+                responses.extend(ll.untagged_responses.pop(key, []))
+
+            for item in responses:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    literal = item[1]
+                    if isinstance(literal, (bytes, bytearray)):
+                        return bytes(literal)
+
+            raise YahooImapError(
+                f"Yahoo returned no message for folder {folder!r}, UID {uid}"
+            )
 
         return self.with_retry("fetch_message_peek", _fetch)
